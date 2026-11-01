@@ -156,6 +156,27 @@ def main():
                   {"url": "https://evil.example.com/magicube"}) is False)
         check("页面归属校验：空 url 否决",
               C._assert_page_is_magicube({"url": ""}) is False)
+
+        # 10) 成功判据：只有「余额真的增加」才算 CLAIMED
+        st, dl, _ = C.classify(100.0, 150.0, True, "", "", ["领取"])
+        check("余额增加 ⇒ CLAIMED", st == "CLAIMED", st)
+        check("余额增加 ⇒ delta=50", dl == 50.0, str(dl))
+        # 🚨 关键：点了按钮 + 文案变成「今日已完成」但余额没变 ⇒ **不算成功**
+        st, dl, dt = C.classify(100.0, 100.0, True, "", "今日已完成", ["领取"])
+        check("余额没变（哪怕文案变了）⇒ 不是 CLAIMED", st != "CLAIMED", st)
+        check("余额没变 ⇒ 记 UNKNOWN", st == "UNKNOWN", st)
+        check("余额没变 ⇒ detail 明说未核实", "未核实" in dt, dt)
+        st, _, _ = C.classify(100.0, 100.0, True, "", "", ["领取"])
+        check("点了但余额没变且无文案 ⇒ UNKNOWN", st == "UNKNOWN", st)
+        # 没点到按钮 + 页面写着今日已完成 ⇒ ALREADY（不是新领取）
+        st, _, _ = C.classify(100.0, 100.0, False, "今日已完成", "今日已完成", [])
+        check("没点按钮 + 已完成文案 ⇒ ALREADY", st == "ALREADY", st)
+        # 余额减少不能算成功
+        st, _, _ = C.classify(100.0, 50.0, True, "", "", ["领取"])
+        check("余额减少 ⇒ 不是 CLAIMED", st != "CLAIMED", st)
+        # 读不到余额也不能算成功
+        st, _, _ = C.classify(None, None, True, "", "今日已完成", ["领取"])
+        check("余额读不到 ⇒ 不是 CLAIMED", st != "CLAIMED", st)
     finally:
         M.stop_chrome(cdp, proc)
         try:
@@ -167,7 +188,7 @@ def main():
     if FAILED:
         print("✗ %d 项未过：%s" % (len(FAILED), ", ".join(FAILED)))
         return 1
-    print("✓ 自测全过（%d 项）" % 20)
+    print("✓ 自测全过（%d 项）" % 28)
     return 0
 
 

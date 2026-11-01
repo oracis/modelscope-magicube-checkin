@@ -2,11 +2,11 @@
 name: modelscope-magicube-checkin
 slug: modelscope-magicube-checkin
 displayName: 魔搭魔粒每日自动领取
-version: 1.2.0
+version: 1.3.0
 visibility: public
 category: dev-programming
 subCategories: [dev-script]
-description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程；只操作 modelscope.cn 域名下的页面，点击前复核页面归属。含人工登录一次的说明、四态判据机、故障处置表与本地自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
+description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据（余额没变一律记 UNKNOWN，不报成功）。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程；只操作 modelscope.cn 域名下的页面，点击前复核页面归属。含人工登录一次的说明、四态判据机、故障处置表与本地自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
 agent_created: true
 ---
 
@@ -120,6 +120,12 @@ python "<SKILL_DIR>/scripts/ms_checkin.py"
 
 🚨 **判据必须是「点了 + 余额变了」**。只判「页面读得到余额」等于只登录不领取也报成功 —— 典型的假绿：日志天天 OK，魔粒一分没多。
 
+🚨 **「余额增加」是 CLAIMED 的唯一充分条件**。点了按钮、页面文案从无变成
+「今日已完成」但余额没变 ⇒ 记 `UNKNOWN` 而**不是** `CLAIMED`：那只是延迟到账的
+*可能*，不是领取成功的证据。未经核实就报成功，会让定时任务把「没领到」误当成
+「领到了」。判据逻辑集中在 `scripts/ms_checkin.py` 的 `classify()`，自测里有
+7 条用例钉死它（含「余额减少」「余额读不到」都不能算 CLAIMED）。
+
 ## 首次使用：人工登录一次
 
 1. 按上面那条命令启动带调试端口的 Chrome（窗口会一直留着）
@@ -163,9 +169,9 @@ python "<SKILL_DIR>/scripts/ms_checkin.py"
 |---|---|
 | `scripts/ms_checkin.py` | 主流程（领取 / 登录 / 状态 / 探针） |
 | `scripts/ms_cdp.py` | 自包含的最小 CDP 客户端（零第三方依赖，只连不管） |
-| `scripts/selftest.py` | 自测：用本地假页面钉死「找按钮 / 点按钮 / 余额判据」三段逻辑 |
+| `scripts/selftest.py` | 自测：用本地假页面钉死「找按钮 / 点按钮 / 余额判据」三段逻辑，另含域名白名单与页面归属校验 |
 
-改动 JS 判据后跑一次自测：`python "<SKILL_DIR>/scripts/selftest.py"`（9 项，不碰真实账号）。
+改动 JS 判据后跑一次自测：`python "<SKILL_DIR>/scripts/selftest.py"`（28 项，不碰真实账号）。
 
 ## 背景：魔粒体系
 

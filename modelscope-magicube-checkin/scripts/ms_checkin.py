@@ -52,10 +52,14 @@
 
 状态机（别把 UNKNOWN 当失败，也别把 ALREADY 当新领取）
 --------------------------------------------------
-    CLAIMED  点了「领取」且余额增加（记 before → after）      退出码 0
+    CLAIMED  点了「领取」且**余额确实增加**（记 before → after）  退出码 0
     ALREADY  没点到按钮，但页面写着「今日已完成 / 今日已领」   退出码 0
     NO_LOGIN 浏览器里没有魔搭会话 → 需要重新登录一次          退出码 2
-    UNKNOWN  读不到判据：没找到领取入口 / 点了但余额没变       退出码 3
+    UNKNOWN  读不到判据 / 点了但余额没变（含「文案变了但余额没变」
+            这种延迟到账情形）—— **未经核实就不算成功**        退出码 3
+
+⚠ 只有「余额增加」是 CLAIMED 的充分条件。页面文案变了但余额没变时，
+  一律记 UNKNOWN —— 那只是延迟到账的**可能**，不是领取成功的证据。
 """
 import argparse
 import json
@@ -283,6 +287,48 @@ def _claimed_text(cdp):
 # ==========================================================================
 # 主流程
 # ==========================================================================
+def classify(before, after, clicked, claimed_before, claimed_after,
+             labels=None):
+    """定性：给定前后余额与文案，返回 (state, delta, detail)。
+
+    🚨 **只有「余额真的增加」才是 CLAIMED**。
+      点了按钮、页面文案从无变成「今日已完成」但余额没变 ⇒ **不算成功**：
+      那只是延迟到账的*可能*，不是领取成功的证据。未经核实的成功结论
+      会让调用方（尤其是定时任务）把「没领到」误当成「领到了」。
+
+    抽成纯函数是为了能脱离浏览器直接测这条判据。
+    """
+    labels = labels or []
+
+    def _n(v):
+        """余额格式化：读不到时显示「?」而不是崩掉。
+
+        ⚠ 余额取不到是**常态**（页面没渲染完 / 网络慢），不是异常路径。
+          用 %g 直接格式化 None 会抛 TypeError，把一次「读不到判据」
+          变成一次脚本崩溃 —— 所以这里统一走 _n。
+        """
+        return "?" if v is None else ("%g" % v)
+
+    if before is not None and after is not None and after > before:
+        return ("CLAIMED", after - before,
+                "领取成功：%g → %g（+%g）" % (before, after, after - before))
+    if clicked:
+        if claimed_after and claimed_after != claimed_before:
+            return ("UNKNOWN", None,
+                    "点了「%s」，页面文案已变为「%s」，但余额没变"
+                    "（%s → %s）—— 可能延迟到账，未核实，不算领取成功"
+                    % ("、".join(labels), claimed_after, _n(before), _n(after)))
+        return ("UNKNOWN", None,
+                "点了「%s」但余额没变（%s → %s），可能延迟到账，去页面确认一下"
+                % ("、".join(labels), _n(before), _n(after)))
+    if claimed_before:
+        return ("ALREADY", None,
+                "页面显示「%s」（余额 %s）" % (claimed_before, _n(before)))
+    return ("UNKNOWN", None,
+            "没找到「领取」按钮，也没有「今日已领」文案（余额 %s）"
+            "—— 可能改版，先 --probe 看页面" % _n(before))
+
+
 def do_checkin(cdp):
     """打开首页 + 魔粒页 → 点「领取」→ 比对余额。返回结果 dict。
 
@@ -382,28 +428,12 @@ def do_checkin(cdp):
     # 5) 定性
     before, after = result["before"], result["balance"]
     claimed_after = _claimed_text(cdp)
-
-    if before is not None and after is not None and after > before:
-        result["state"] = "CLAIMED"
-        result["delta"] = after - before
-        result["detail"] = "领取成功：%g → %g（+%g）" % (before, after, after - before)
-    elif result["clicked"] and claimed_after and claimed_after != claimed_before:
-        # 点了按钮、页面文案从「无」变成「今日已完成」⇒ 也算领到了（余额可能延迟刷新）
-        result["state"] = "CLAIMED"
-        result["delta"] = None
-        result["detail"] = "领取成功：页面已变为「%s」（余额 %g，可能延迟刷新）" % (
-            claimed_after, after)
-    elif result["clicked"]:
-        result["state"] = "UNKNOWN"
-        result["detail"] = ("点了「%s」但余额没变（%g → %g），可能延迟到账，"
-                            "去页面确认一下" % ("、".join(result["labels"]),
-                                                before, after))
-    elif claimed_before:
-        result["state"] = "ALREADY"
-        result["detail"] = "页面显示「%s」（余额 %g）" % (claimed_before, before)
-    else:
-        result["detail"] = ("没找到「领取」按钮，也没有「今日已领」文案"
-                            "（余额 %g）—— 可能改版，先 --probe 看页面" % before)
+    state, delta, detail = classify(before, after, result["clicked"],
+                                     claimed_before, claimed_after,
+                                     result["labels"])
+    result["state"] = state
+    result["delta"] = delta
+    result["detail"] = detail
     return result
 
 

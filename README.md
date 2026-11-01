@@ -4,17 +4,19 @@
 
 **已上架**：
 - SkillHub（腾讯主市场）→ `https://skillhub.cn/skills/modelscope-magicube-checkin`（v1.1.0，已过审）
-- ClawHub（海外市场）→ `https://clawhub.ai/skills/oracis/modelscope-magicube-checkin`（v1.2.0）
+- ClawHub（海外市场）→ `https://clawhub.ai/skills/oracis/modelscope-magicube-checkin`（v1.3.0）
 - GitHub 源码 → 本仓库
 
 魔粒（Magicube）是魔搭 API-Inference 的算力额度。**登录魔搭不等于到账** —— 必须到魔粒页点「领取」，额度才会进余额。
 本 Skill 用 Chrome DevTools Protocol 连接**你自己已经打开的 Chrome**，在页面上点「领取」按钮，并**以余额前后差值作为唯一成功判据**。脚本零第三方依赖（只用 Python 标准库）。
 
-- **判据不造假**：必须「点了 + 余额真的变了」才算领到。只判「页面读得到余额」是典型的假绿（日志天天 OK，额度一分没多）
+- **判据不造假**：必须「点了 + 余额真的变了」才算领到。只判「页面读得到余额」是典型的假绿（日志天天 OK，额度一分没多）。
+  点了按钮、页面文案变成「今日已完成」但**余额没变** ⇒ 记 `UNKNOWN` 而**不是** `CLAIMED`：
+  延迟到账只是*可能*，不是领取成功的证据
 - **零依赖**：只用 Python 标准库（自带最小 WebSocket + CDP 客户端），无需 `pip install`
 - **两按钮连点**：一天有「注册并登录 200」+「绑定阿里云 50」两个领取按钮，只点一个会漏领
 - **四态可判**：`CLAIMED` / `ALREADY` / `NO_LOGIN` / `UNKNOWN`，退出码区分，漏跑无副作用
-- **带自测**：9 项本地自测钉死「找按钮 / 点按钮 / 余额判据」三段逻辑，改 JS 判据后可回归
+- **带自测**：28 项本地自测钉死「找按钮 / 点按钮 / 余额判据 / 域名白名单 / 页面归属校验」，改 JS 判据后可回归
 
 ## 能力边界（先看这段，能省掉很多误解）
 
