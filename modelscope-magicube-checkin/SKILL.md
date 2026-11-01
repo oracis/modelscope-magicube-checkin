@@ -2,11 +2,11 @@
 name: modelscope-magicube-checkin
 slug: modelscope-magicube-checkin
 displayName: 魔搭魔粒每日自动领取
-version: 1.1.0
+version: 1.2.0
 visibility: public
 category: dev-programming
 subCategories: [dev-script]
-description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程。含人工登录一次的说明、四态判据机、故障处置表与本地自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
+description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程；只操作 modelscope.cn 域名下的页面，点击前复核页面归属。含人工登录一次的说明、四态判据机、故障处置表与本地自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
 agent_created: true
 ---
 
@@ -32,6 +32,22 @@ agent_created: true
 - ❌ 不安装任何依赖包（只用 Python 标准库）
 
 对浏览器唯一的写入就是那一次点击。登录态由你在浏览器里自己完成，脚本只复用它。
+
+## 操作范围：只碰魔搭页面
+
+脚本会**在它连上的那个页面上点按钮**，所以「连上哪个页面」必须被约束住。三道闸：
+
+| 闸 | 位置 | 作用 |
+|---|---|---|
+| 1. 找 tab 时限定 host | `find_target(..., host_suffixes=["modelscope.cn"])` | 只认 `modelscope.cn` 及其子域的 tab |
+| 2. 点击前复核页面归属 | `_assert_page_is_magicube()` | 连上后页面可能被导航走，点之前重新确认 `location.host` |
+| 3. 后缀防拼接 | `_host_matches()` | `evil-modelscope.cn`、`a.modelscope.cn.evil.com` 一律拒绝 |
+
+host 判定要求「完全相等」或「以 `.` + 域名结尾」，因此 `evil-modelscope.cn` 这种
+后缀拼接骗不过去。
+
+页面归属校验失败时脚本**中止且一个按钮都不点**，返回 `UNKNOWN` 并在 detail 里
+说明当前 URL。
 
 ## 何时使用
 
@@ -70,14 +86,21 @@ python "<SKILL_DIR>/scripts/ms_checkin.py"
 # Windows（Git Bash / CMD 都行）——独立 profile，Chrome 136+ 的官方要求
 "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" \
   --remote-debugging-port=9333 \
+  --remote-debugging-address=127.0.0.1 \
   --user-data-dir="$HOME/chrome-ms-profile" \
-  --no-first-run --no-default-browser-check --no-sandbox \
+  --no-first-run --no-default-browser-check \
   https://www.modelscope.cn/magicube/usage
 ```
 
-> ⚠ **`--no-sandbox` 是实测必需的**：在受限环境（容器 / 受管沙箱）里，
->   不带这个标志 Chrome 会加载完策略就退出（exit code 3），调试端口根本不开。
->   它只影响你**自己**启动的这个 Chrome 实例。
+> 🔒 **为什么默认不带 `--no-sandbox`**：关掉 Chrome 沙箱会显著降低浏览器自身的
+>   安全隔离，所以它只是**受限环境**（容器 / 受管沙箱）里 Chrome 启动即退出
+>   （exit code 3）时的显式兜底，不是默认动作。真需要时在命令末尾追加即可。
+>
+> 🔒 **调试端口只绑 127.0.0.1**（上面命令已显式指定），不会暴露到局域网 ——
+>   CDP 端口等于对浏览器完全的读写控制权，绝不能监听所有网卡。
+>
+> 🔒 **独立 profile 是安全边界，不只是兼容要求**：这个实例的 cookie 与日常
+>   Chrome 天然分开，脚本看到的东西和你日常浏览的会话不是一份。
 
 端口不通时，脚本会**打印这条可直接复制的命令**并退出，不会替你做任何事。
 

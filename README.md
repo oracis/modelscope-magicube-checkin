@@ -4,7 +4,7 @@
 
 **已上架**：
 - SkillHub（腾讯主市场）→ `https://skillhub.cn/skills/modelscope-magicube-checkin`（v1.1.0，已过审）
-- ClawHub（海外市场）→ `https://clawhub.ai/skills/oracis/modelscope-magicube-checkin`（v1.1.0）
+- ClawHub（海外市场）→ `https://clawhub.ai/skills/oracis/modelscope-magicube-checkin`（v1.2.0）
 - GitHub 源码 → 本仓库
 
 魔粒（Magicube）是魔搭 API-Inference 的算力额度。**登录魔搭不等于到账** —— 必须到魔粒页点「领取」，额度才会进余额。
@@ -30,6 +30,23 @@
 - ❌ 不安装任何依赖包（只用 Python 标准库）
 
 对浏览器唯一的写入就是那一次点击。登录态由你在浏览器里自己完成，脚本只复用它。
+
+## 操作范围：只碰魔搭页面
+
+脚本会**在它连上的那个页面上点按钮**，所以「连上哪个页面」必须被约束住。三道闸：
+
+| 闸 | 作用 |
+|---|---|
+| 找 tab 时限定 host | 只认 `modelscope.cn` 及其子域的 tab |
+| 点击前复核页面归属 | 连上后页面可能被导航走，点之前重新确认 `location.host` |
+| 后缀防拼接 | `evil-modelscope.cn`、`a.modelscope.cn.evil.com` 一律拒绝 |
+
+host 判定要求「完全相等」或「以 `.` + 域名结尾」，后缀拼接骗不过去。
+页面归属校验失败时脚本**中止且一个按钮都不点**。
+
+启动 Chrome 时**默认不带 `--no-sandbox`**（关沙箱会降低浏览器自身的安全隔离），
+只在容器 / 受管沙箱这类受限环境里 Chrome 启动即退出时才显式追加；
+调试端口显式绑定 `127.0.0.1`，不会暴露到局域网。
 
 ## 效果
 

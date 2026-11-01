@@ -70,6 +70,11 @@ import ms_cdp as M  # noqa: E402
 USAGE_URL = "https://www.modelscope.cn/magicube/usage"
 HOME_URL = "https://www.modelscope.cn/"
 
+# 允许操作的站点白名单（安全边界，不是可选优化）。
+# 本脚本连上某个 tab 之后会**在那个页面上点按钮**，所以必须先确认
+# 它确实是魔搭的页面 —— 只按路径子串找 tab 会连上第三方站点。
+ALLOWED_HOSTS = ["modelscope.cn"]
+
 PORT = int(os.environ.get("MS_CDP_PORT", "9333"))
 PROFILE = os.path.expanduser(
     os.environ.get("MS_CDP_PROFILE")
@@ -238,9 +243,22 @@ def _read_page(cdp):
     return info, lines[:10]
 
 
+def _assert_page_is_magicube(info):
+    """确认当前页面确实是魔搭的页面。返回 True/False。
+
+    🔒 这是**点击前的最后一道闸**：find_target 限定了 host 白名单，
+      但页面可能在我们连上之后被导航走了（或者 tab 被复用）。
+      ⇒ 点击任何按钮之前，必须重新确认 location.host 在白名单里。
+    """
+    url = str(info.get("url") or "")
+    if not url:
+        return False
+    return M._host_matches(url, ALLOWED_HOSTS)
+
+
 def _open_usage(cdp, wait=7):
     """开魔粒页并连上。返回 True。"""
-    t = cdp.find_target("magicube")
+    t = cdp.find_target("magicube", host_suffixes=ALLOWED_HOSTS)
     if t:
         try:
             if cdp.connect_target(t["id"]):
@@ -302,6 +320,13 @@ def do_checkin(cdp):
 
     result["lines"] = lines
     result["before"] = _balance_of(info)
+
+    # 🔒 点击前的页面归属校验：不是魔搭页面就绝不下手点按钮。
+    if not _assert_page_is_magicube(info):
+        result["state"] = "UNKNOWN"
+        result["detail"] = ("当前页面不是魔搭（url=%s），已中止、没点任何按钮"
+                            % str(info.get("url"))[:120])
+        return result
 
     # ⚠ 顺序要紧：先判「有登录入口」= 未登录，再判其余。
     #   反过来（先判 URL 含 magicube / 有「我的魔粒」字样）会 100% 误报成功。
@@ -459,7 +484,7 @@ def do_login(cdp, wait_seconds=300):
     last_nav = 0.0
     while time.time() < deadline:
         try:
-            t = cdp.find_target("modelscope")
+            t = cdp.find_target("modelscope", host_suffixes=ALLOWED_HOSTS)
             if t and cdp.tid != t["id"]:
                 cdp.connect_target(t["id"])
             url = ""

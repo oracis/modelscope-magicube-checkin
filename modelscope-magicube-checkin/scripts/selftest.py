@@ -125,6 +125,37 @@ def main():
         # 6) 「今日已完成」文案能被认出来
         txt = str(cdp.eval(C.JS_CLAIMED_TEXT) or "")
         check("认得「今日已完成」", "今日已完成" in txt, repr(txt))
+
+        # 7) 域名白名单：只有魔搭的 host 才算数
+        #    （这是安全边界：连上 tab 之后会在那个页面上点按钮）
+        check("白名单放行 www.modelscope.cn",
+              M._host_matches("https://www.modelscope.cn/magicube/usage",
+                               C.ALLOWED_HOSTS) is True)
+        check("白名单放行裸域 modelscope.cn",
+              M._host_matches("https://modelscope.cn/x", C.ALLOWED_HOSTS) is True)
+        check("白名单拦截第三方站点",
+              M._host_matches("https://evil.example.com/magicube",
+                              C.ALLOWED_HOSTS) is False)
+        # 8) 后缀拼接攻击：evil-modelscope.cn 不是 modelscope.cn
+        check("白名单拦截后缀拼接 evil-modelscope.cn",
+              M._host_matches("https://evil-modelscope.cn/magicube",
+                              C.ALLOWED_HOSTS) is False)
+        check("白名单拦截子域劫持 attacker.modelscope.cn.evil.com",
+              M._host_matches("https://attacker.modelscope.cn.evil.com/x",
+                              C.ALLOWED_HOSTS) is False)
+        check("白名单拦截非 http 伪协议 javascript:",
+              M._host_matches("javascript:alert(1)//modelscope.cn",
+                              C.ALLOWED_HOSTS) is False)
+
+        # 9) 点击前的页面归属校验：非魔搭页面必须否决
+        check("页面归属校验：魔搭页放行",
+              C._assert_page_is_magicube(
+                  {"url": "https://www.modelscope.cn/magicube/usage"}) is True)
+        check("页面归属校验：第三方页否决",
+              C._assert_page_is_magicube(
+                  {"url": "https://evil.example.com/magicube"}) is False)
+        check("页面归属校验：空 url 否决",
+              C._assert_page_is_magicube({"url": ""}) is False)
     finally:
         M.stop_chrome(cdp, proc)
         try:
@@ -136,7 +167,7 @@ def main():
     if FAILED:
         print("✗ %d 项未过：%s" % (len(FAILED), ", ".join(FAILED)))
         return 1
-    print("✓ 自测全过（%d 项）" % 9)
+    print("✓ 自测全过（%d 项）" % 20)
     return 0
 
 

@@ -57,6 +57,24 @@ def log(msg):
     print(msg, flush=True)
 
 
+def _host_matches(url, host_suffixes):
+    """判断 URL 的 host 是否落在允许的后缀列表里。
+
+    ⚠ 用**后缀**而不是精确相等，是为了兼容 www.modelscope.cn / modelscope.cn
+      两种写法；但必须防住「evil-modelscope.cn」这类后缀拼接攻击 ——
+      所以要求 host 要么等于后缀，要么以「.」+ 后缀结尾。
+    """
+    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#]+)", url or "")
+    if not m:
+        return False
+    host = m.group(1).split("@")[-1].split(":")[0].lower()
+    for suf in host_suffixes:
+        suf = suf.lower().lstrip(".")
+        if host == suf or host.endswith("." + suf):
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------
 # WebSocket（最小实现）
 # --------------------------------------------------------------------------
@@ -191,10 +209,23 @@ class CDP:
     def list_targets(self):
         return self._http("/json")
 
-    def find_target(self, needle):
-        """按 URL 子串找已存在的 target；找不到返回 None。"""
+    def find_target(self, needle, host_suffixes=None):
+        """按 URL 子串找已存在的 target；找不到返回 None。
+
+        ⚠ host_suffixes 不为空时**只接受 host 匹配**的 target。
+          这个限制是安全边界，不是可选优化：
+          只按子串找 tab，理论上会连上任意含该子串的页面
+          （比如用户开着某个第三方站点，路径里恰好有 "magicube"），
+          而本模块连上之后会**在那个页面上点按钮**。
+          ⇒ 凡是「连上别人的页面并操作」的路径，都必须限定 host。
+        """
         for t in self.list_targets():
-            if needle in (t.get("url") or "") and t.get("webSocketDebuggerUrl"):
+            url = t.get("url") or ""
+            if needle not in url:
+                continue
+            if host_suffixes and not _host_matches(url, host_suffixes):
+                continue
+            if t.get("webSocketDebuggerUrl"):
                 return t
         return None
 
@@ -435,22 +466,33 @@ def ensure_chrome(port=9333, url="about:blank", profile=None):
     这样做的原因：脚本替用户 spawn/结束浏览器进程属于高影响操作，
     既容易误伤用户自己的窗口，也不该由一个自动化脚本代劳。
     返回 (proc_or_None, launched_bool) —— 本实现下 proc 恒为 None。
+
+    🔒 命令里**默认不带 `--no-sandbox`**：关掉 Chrome 沙箱会显著降低
+       浏览器自身的安全隔离，所以它只是「容器 / 受管沙箱里 Chrome 起不来」
+       时的**显式兜底**，不该是默认动作。默认命令另外做了两件加固：
+       调试端口显式绑定 127.0.0.1（不监听所有网卡）、
+       强制使用独立 profile（与日常浏览器的登录态、cookie 天然分开）。
     """
     if cdp_up(port):
         return None, False
     chrome, _label = pick_chrome()
     exe = chrome or "<Chrome 可执行文件路径>"
-    cmd = ('"%s" --remote-debugging-port=%d --user-data-dir="%s" '
-           '--no-first-run --no-default-browser-check --no-sandbox %s'
-           % (exe, port,
-              profile or os.path.expanduser("~/chrome-ms-profile"), url))
+    prof = profile or os.path.expanduser("~/chrome-ms-profile")
+    cmd = ('"%s" --remote-debugging-port=%d --remote-debugging-address=127.0.0.1 '
+           '--user-data-dir="%s" --no-first-run --no-default-browser-check %s'
+           % (exe, port, prof, url))
     raise SystemExit(
         "调试端口 127.0.0.1:%d 没开。\n"
         "请自己启动一个带调试端口的 Chrome（下面这条可直接复制）：\n\n"
         "  %s\n\n"
-        "（用独立 profile 是 Chrome 136+ 的官方要求：默认 user-data-dir "
-        "不允许开调试端口；--no-sandbox 是受限环境下 Chrome 能起来的前提。"
-        "窗口会一直留着，用完关掉即可。）" % (port, cmd))
+        "说明：\n"
+        "  · 独立 profile 是 Chrome 136+ 的官方要求（默认 user-data-dir "
+        "不允许开调试端口），也让这个实例的登录态与日常 Chrome 分开。\n"
+        "  · 调试端口已显式绑定 127.0.0.1，不会暴露到局域网。\n"
+        "  · 窗口会一直留着，用完自己关掉即可。\n"
+        "  · 若在容器 / 受管沙箱里 Chrome 启动即退出，可再加 --no-sandbox\n"
+        "    （那会关闭浏览器沙箱、降低安全隔离，仅限这种受限环境）。"
+        % (port, cmd))
 
 
 def stop_chrome(cdp, proc):
