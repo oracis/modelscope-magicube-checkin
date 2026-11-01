@@ -3,8 +3,8 @@
 > 魔搭（ModelScope）每日魔粒自动领取 Skill —— 真点页面、以余额变化为唯一成功判据。
 
 **已上架**：
-- SkillHub（腾讯主市场）→ `https://skillhub.cn/skills/modelscope-magicube-checkin`（v1.1.0，已过审）
-- ClawHub（海外市场）→ `https://clawhub.ai/skills/oracis/modelscope-magicube-checkin`（v1.3.0）
+- SkillHub（腾讯主市场）→ `https://skillhub.cn/skills/modelscope-magicube-checkin`（v1.3.0，已过审）
+- ClawHub（海外市场）→ `https://clawhub.ai/oracis/skills/modelscope-magicube-checkin`（v1.1.0；v1.3.0 排队发布中）
 - GitHub 源码 → 本仓库
 
 魔粒（Magicube）是魔搭 API-Inference 的算力额度。**登录魔搭不等于到账** —— 必须到魔粒页点「领取」，额度才会进余额。
