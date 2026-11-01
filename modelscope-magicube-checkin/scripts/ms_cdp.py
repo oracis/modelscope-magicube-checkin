@@ -1,29 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""最小 CDP 客户端 + Chrome 启动器（零依赖，只用 Python 标准库）。
+"""最小 CDP 客户端（零依赖，只用 Python 标准库）。
 
 为什么自带一套而不用别的项目的模块
 ----------------------------------
 本 skill 要能脱离 ai-case-library 独立跑（换台机器、换个项目），
-所以把「WebSocket + CDP 命令 + Chrome 启动」这三件事收进一个文件。
+所以把「WebSocket + CDP 命令」这两件事收进一个文件。
+
+设计原则：**只连、不管**
+----------------------
+本模块**只连接用户自己已经启动好的 Chrome**，不代用户启动、也不代用户
+结束浏览器进程：
+
+- 端口通 → 直接用
+- 端口不通 → 打印一条可直接复制的启动命令，让用户自己跑
+
+理由很简单：替用户 spawn / kill 浏览器进程是高影响操作，
+既可能误伤用户自己开着的窗口，也不该由自动化脚本代劳。
+（脚本对浏览器的唯一写入是「点页面上的领取按钮」，只此而已。）
 
 三个已实测的硬坑（照抄前先读完，别再踩）
 ------------------------------------------
-1. **必须 `--no-sandbox`**：不带时 Chrome 会加载完 policy 就 2 秒内退出
-   （exit code 3, RESULT_CODE_KILLED_BAD_MESSAGE），DevTools 端口根本不开。
-   已用标志矩阵验证过：baseline / --disable-gpu 都是 FAIL，加 --no-sandbox 才 OK。
-2. **必须先清 `Default/LOCK`**：强杀残留的锁会让 Chrome「启动即退、无报错无窗口」。
-   症状看起来像登录态问题，实际是锁没清掉。
-   ⚠ 删除可能被安全删除钩子拦（safe-delete 改走回收站 API，对被 Chrome 占着的
-   LOCK 直接失败）⇒ 兜底用 `os.rename` 把 LOCK 挪出 profile（挪走≠删除）。
-3. **必须清干净代理**：`http_proxy=127.0.0.1:xxxx` 会掐断 CDP 的 WebSocket
-   （10053/10054）。CDP 相关的 urllib 请求也要显式 `ProxyHandler({})`，
-   否则 curl/urllib 会走系统代理。
-
-另外：**Chrome 136+ 拒绝在【默认 user-data-dir】上开调试端口**（官方设计，
-见 https://developer.chrome.com/blog/remote-debugging-port），
-所以必须用独立 profile —— 登录态天然与日常 Chrome 分家，这是预期行为不是故障。
-日常 Chrome 的 cookie 是 App-Bound 加密（v20 前缀），**解不开**，别想着复用。
+1. **Chrome 136+ 拒绝在【默认 user-data-dir】上开调试端口**（官方设计，
+   见 https://developer.chrome.com/blog/remote-debugging-port），
+   所以必须用独立 profile —— 登录态天然与日常 Chrome 分家，这是预期行为
+   不是故障。日常 Chrome 的 cookie 是 App-Bound 加密（v20 前缀），
+   **读不出来**，也不需要读。
+2. **访问 127.0.0.1 的调试端口要绕开系统代理**，否则 WebSocket 会被
+   10053/10054 重置。做法是用 `urllib.request.ProxyHandler({})` 只让
+   **本模块的 urllib** 不走代理；**不去改 os.environ**——改全局代理变量
+   会连带影响调用方的其他网络访问，那不是本脚本该做的副作用。
+3. **profile 里的 SingletonLock 不去动它**。它是浏览器自己的运行期文件，
+   本脚本没有理由替用户删。若真被强杀残留卡住，正确做法是换一个
+   profile 目录，而不是由脚本去动别人的浏览器文件。
 
 WS 实现说明：只做客户端→服务端方向的帧掩码（RFC 6455 要求），
 不处理分片重组的续帧以外的情况，够用即可。
@@ -35,14 +44,12 @@ import re
 import select
 import socket
 import struct
-import subprocess
-import tempfile
 import time
 import urllib.request
 
 __all__ = [
-    "WS", "CDP", "cdp_up", "clear_proxy", "remove_lock", "pick_chrome",
-    "build_args", "wait_cdp", "ensure_chrome", "stop_chrome", "log",
+    "WS", "CDP", "cdp_up", "clear_proxy", "browser_endpoint", "remove_lock",
+    "pick_chrome", "ensure_chrome", "stop_chrome", "log",
 ]
 
 
@@ -164,11 +171,10 @@ class CDP:
                 "  https://developer.chrome.com/blog/remote-debugging-port）。\n"
                 "  ⇒ CDP 只能跑在【独立 profile】上，登录态与日常 Chrome 分家，\n"
                 "    这是官方设计，不是本机故障。\n"
-                "  ⚠ 别再试图复制/解密日常 Chrome 的 Cookies（App-Bound 加密解不开）。\n"
                 "  请依次确认：\n"
-                "    1) 已完全退出所有 chrome.exe（任务管理器确认无残留）\n"
-                "    2) 删除强杀残留的锁：<profile>\\Default\\LOCK\n"
-                "    3) 用【Chrome for Testing】启动（官方对自动化场景的推荐浏览器）\n"
+                "    1) 调试端口号的 Chrome 确实还开着\n"
+                "    2) 启动时带了 --user-data-dir=<独立目录>\n"
+                "    3) 端口号与本脚本的 --port 一致\n"
                 "  原始错误：%s" % (port, e))
         self.bws = WS(ver["webSocketDebuggerUrl"])
         self.ws = None
@@ -227,12 +233,19 @@ class CDP:
         except Exception:
             pass
 
-    def close_browser(self):
-        try:
-            self.bws.send_text(json.dumps(
-                {"id": 999999, "method": "Browser.close", "params": {}}))
-        except Exception:
-            pass
+    def close_ws(self):
+        """只关闭 WebSocket 连接，不断浏览器、不关标签页。
+
+        ⚠ 本模块**不提供**「关闭浏览器」的能力：浏览器是用户自己的，
+          脚本无权替他关掉，也关不掉别人的窗口。
+        """
+        for ws in (self.ws, self.bws):
+            try:
+                if ws is not None:
+                    ws.close()
+            except Exception:
+                pass
+        self.ws = None
 
     # ---- 页面级 ----
     def _enable_and_grab_context(self, timeout=6):
@@ -352,36 +365,34 @@ def cdp_up(port):
 
 
 def clear_proxy():
-    """清干净代理。留着 http_proxy 会把 CDP 的 WebSocket 掐断（10053/10054）。"""
-    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-              "ALL_PROXY", "all_proxy"):
-        os.environ.pop(k, None)
+    """返回一个**不走系统代理**的 urllib opener（仅本模块内部用）。
+
+    ⚠ 为什么需要：走系统代理访问 127.0.0.1 的调试端口会被代理截走，
+      表现为 WebSocket 10053/10054 连接重置。
+    ⚠ 只用 ProxyHandler({}) 让**本模块的 urllib** 不走代理，**不改
+      os.environ** —— 改全局代理变量会连带影响调用方的其他网络访问，
+      属于不该由本脚本做的副作用。
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def browser_endpoint(port):
+    """返回调试端口的 URL（供调用方拼 /json/version 等路径）。"""
+    return "http://127.0.0.1:%d" % port
 
 
 def remove_lock(profile):
-    """挪掉强杀残留的 LOCK —— 「启动即退」的头号根因。
+    """检查 Chrome profile 里的 SingletonLock 是否存在（**不删除、不挪动**）。
 
-    ⚠ 只能用 Python 删：bash 的 `rm -f` 会被安全删除策略拦。
-    ⚠ `os.remove` 本身也可能被 safe-delete 钩子改走回收站 API 而失败
-    ⇒ 兜底用 `os.rename` 把 LOCK 挪出 profile（挪走≠删除，不触发删除钩子）。
+    ⚠ 这里刻意只做「探测」，不做任何删除/改名：
+      Chrome 的 SingletonLock 属于浏览器自己的运行期文件，本脚本没有
+      理由替用户删它。若真被强杀残留卡住，正确做法是让用户换一个
+      profile 目录（--profile），而不是由脚本动别人的浏览器文件。
     """
     lock = os.path.join(profile, "Default", "LOCK")
-    if not os.path.exists(lock):
-        return False
-    try:
-        os.remove(lock)
-        log("  cleared stale LOCK")
-        return True
-    except Exception as e:
-        log("  [warn] os.remove LOCK failed (%s), fallback to rename" % e)
-    try:
-        dst = os.path.join(tempfile.gettempdir(),
-                           "chrome_cdp_LOCK_%d" % int(time.time()))
-        os.rename(lock, dst)
-        log("  moved stale LOCK -> %s" % dst)
-        return True
-    except Exception as e:
-        log("  [warn] cannot remove LOCK: %s" % e)
+    if os.path.exists(lock):
+        log("  [info] profile 里存在 LOCK 文件（可能是上次异常退出的残留）。"
+            "本脚本不删除它；若 Chrome 因此启动不了，请换一个 --profile 目录。")
     return False
 
 
@@ -397,27 +408,8 @@ def pick_chrome():
     return None, None
 
 
-def build_args(chrome, profile, extra=(), port=None, headless=None):
-    """⚠ `--no-sandbox` 是硬性要求（见模块 docstring 坑 1）。"""
-    if headless is None:
-        headless = not str(os.environ.get("CHROME_HEADED", "")).lower() \
-            in ("1", "true", "yes")
-    base = [
-        chrome,
-        "--remote-debugging-port=%d" % (port or 9333),
-        "--user-data-dir=%s" % profile,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--no-sandbox",
-    ]
-    if headless:
-        base.append("--headless=new")
-        base.append("--disable-gpu")
-    return base + list(extra)
-
-
-def wait_cdp(proc, timeout=40, port=None):
-    """轮询 DevTools 端口。返回 True 表示已通。
+def wait_cdp(timeout=40, port=None):
+    """轮询 DevTools 端口，返回 True 表示已通。
 
     ⚠ 用 urllib 而不是 curl：curl 会带上系统代理，必须显式清空。
     """
@@ -425,9 +417,6 @@ def wait_cdp(proc, timeout=40, port=None):
     url = "http://127.0.0.1:%d/json/version" % (port or 9333)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if proc is not None and proc.poll() is not None:
-            log("  Chrome exited early, code=%s" % proc.poll())
-            return False
         try:
             op.open(url, timeout=2).read()
             return True
@@ -436,50 +425,46 @@ def wait_cdp(proc, timeout=40, port=None):
     return False
 
 
-def ensure_chrome(headless=True, port=9333, url="about:blank", profile=None):
-    """端口不通就自己起一个 Chrome。返回 (proc_or_None, launched_bool)。"""
+def ensure_chrome(port=9333, url="about:blank", profile=None):
+    """确保调试端口可用。
+
+    ✅ 首选：**连接用户已经开着的 Chrome**（端口已通就直接用，不碰任何进程）。
+    ❌ 端口不通时：**不自动代用户启动浏览器**，而是打印一条可直接复制的
+       启动命令，让用户自己决定要不要跑。
+
+    这样做的原因：脚本替用户 spawn/结束浏览器进程属于高影响操作，
+    既容易误伤用户自己的窗口，也不该由一个自动化脚本代劳。
+    返回 (proc_or_None, launched_bool) —— 本实现下 proc 恒为 None。
+    """
     if cdp_up(port):
         return None, False
-    profile = profile or os.path.expanduser("~/chrome-ms-profile")
-    clear_proxy()
-    chrome, label = pick_chrome()
-    if chrome is None:
-        raise SystemExit("找不到 Chrome 可执行文件（试过 %d 个候选路径）"
-                         % len(CHROME_CANDIDATES))
-    remove_lock(profile)
-    os.makedirs(profile, exist_ok=True)
-    args = build_args(chrome, profile, extra=[url], port=port, headless=headless)
-    log("[ms] 起 Chrome(%s) port=%d headless=%s profile=%s"
-        % (label, port, headless, profile))
-    # ⚠ DETACHED_PROCESS：让 Chrome 脱离本进程的控制台/作业对象。
-    # 沙箱会回收「调用 shell 退出时」的整棵进程树，不脱钩的话 --login
-    # 开出来的窗口往往撑不到人去点登录就没了。PID 仍在我们手里，
-    # stop_chrome 照样能按 PID 收掉。
-    flags = 0x00000008 if os.name == "nt" else 0  # DETACHED_PROCESS
-    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            stdin=subprocess.DEVNULL,
-                            creationflags=flags)
-    if not wait_cdp(proc, timeout=40, port=port):
-        raise SystemExit("Chrome 启动失败（exit=%s）" % proc.poll())
-    return proc, True
+    chrome, _label = pick_chrome()
+    exe = chrome or "<Chrome 可执行文件路径>"
+    cmd = ('"%s" --remote-debugging-port=%d --user-data-dir="%s" '
+           '--no-first-run --no-default-browser-check --no-sandbox %s'
+           % (exe, port,
+              profile or os.path.expanduser("~/chrome-ms-profile"), url))
+    raise SystemExit(
+        "调试端口 127.0.0.1:%d 没开。\n"
+        "请自己启动一个带调试端口的 Chrome（下面这条可直接复制）：\n\n"
+        "  %s\n\n"
+        "（用独立 profile 是 Chrome 136+ 的官方要求：默认 user-data-dir "
+        "不允许开调试端口；--no-sandbox 是受限环境下 Chrome 能起来的前提。"
+        "窗口会一直留着，用完关掉即可。）" % (port, cmd))
 
 
 def stop_chrome(cdp, proc):
-    """只杀自己拉起的那个 Chrome，绝不 taskkill /IM chrome.exe。"""
+    """**只断开 WebSocket 连接，不结束任何浏览器进程**。
+
+    本脚本只连接用户自己启动的 Chrome，用完就断开 ——
+    浏览器窗口归用户所有，脚本无权替他关掉。
+    """
     try:
         if cdp is not None:
-            cdp.close_browser()
-            time.sleep(1)
+            cdp.close_ws()
     except Exception:
         pass
-    if proc is None:
-        return
-    if proc.poll() is None:
-        subprocess.run(["taskkill", "/F", "/PID", str(proc.pid), "/T"],
-                       check=False, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
-    log("[ms] Chrome 已关闭 (pid=%s)" % proc.pid)
+    log("[ms] 已断开 CDP 连接（浏览器窗口保持不变，由你决定何时关闭）")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 name: modelscope-magicube-checkin
 slug: modelscope-magicube-checkin
 display_name: 魔搭魔粒每日自动领取
-version: 1.0.0
+version: 1.1.0
 author: oracis
 category: 开发编程
 platforms:
@@ -9,7 +9,7 @@ platforms:
   - Claude Code
   - Codex
 license: MIT
-description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。走 Chrome DevTools Protocol 真点页面「领取」按钮，以余额变化作为唯一成功判据，不调逆向接口、不依赖「登录即到账」的假设。含一次性人工登录（登录态存独立 Chrome profile，之后每天无头复用）、四态判据机、故障处置表与 9 项自测脚本。覆盖 Chrome 136+ 独立 profile 限制、App-Bound cookie 不可解、两个领取按钮需连点、按钮误选等全部踩坑点。
+description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程。含人工登录一次的说明、四态判据机（CLAIMED/ALREADY/NO_LOGIN/UNKNOWN）、故障处置表与本地自测脚本。
 triggers:
   - 领魔粒
   - 魔搭签到

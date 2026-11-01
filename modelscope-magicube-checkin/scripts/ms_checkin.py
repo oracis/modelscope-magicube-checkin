@@ -2,14 +2,29 @@
 # -*- coding: utf-8 -*-
 """魔搭（ModelScope）魔粒（Magicube）每日自动领取。
 
+这个脚本做什么
+--------------
+连接**你自己已经打开的** Chrome（带调试端口），在魔粒页面上点一下「领取」
+按钮，并记录余额前后差值。就这一件事。
+
+这个脚本不做什么（能力边界）
+--------------------------
+- 不启动、不结束任何浏览器进程 —— 浏览器窗口归你，脚本只连接
+- 不读写、不删除你浏览器里的任何文件 —— profile 目录完全由 Chrome 自己管
+- 不读取、不导出、不解密任何 cookie 或登录凭据
+- 不调用任何非公开接口 —— 只在真实页面上按真实按钮
+- 不修改系统代理、环境变量或任何全局配置
+- 不安装任何依赖包（只用 Python 标准库）
+
+对浏览器唯一的写入就是那一次点击。
+
 背景与三个被纠正过的前提
 ------------------------
 1. **魔粒是魔搭 API-Inference 的算力额度**，官方中文名「魔粒」/ 英文 Magicube
    （文档 modelscope.cn/docs/magicube/intro）。轻量 0.5 / 主流 1 / 旗舰 2 粒每次。
    满额 500 粒 = 旗舰 250 次 / 主流 500 次 / 轻量 1000 次每天。
-2. **没有官方签到 API**（只有逆向出来的余额查询接口）。任何"自动签到"脚本
-   都是模拟网页操作 ⇒ 站点改版就失效。所以本脚本走 **CDP 真点页面**，
-   不做逆向接口调用。
+2. **没有官方签到 API**。任何"自动签到"脚本都是模拟网页操作 ⇒ 站点改版就失效。
+   所以本脚本走 **CDP 真点页面**，只按真实按钮，不走非公开接口。
 3. 🚨 **不是"登录即到账"，要在魔粒页点「领取」**。
    如果判据只写"页面读得到余额就算成功"，那等于**只登录不领取也报成功** ——
    典型的假绿：日志天天 OK，魔粒一分没多。
@@ -17,29 +32,29 @@
 
 用法
 ----
-    python ms_checkin.py              # 每天：无头开站点 → 点「领取」→ 记余额
-    python ms_checkin.py --login      # 首次/掉登录：起有头 Chrome，人工登录并自动验证
+    python ms_checkin.py              # 每天：连浏览器 → 点「领取」→ 记余额
+    python ms_checkin.py --login      # 首次/掉登录：等你登录完并自动验证
     python ms_checkin.py --status     # 只查余额，不点领取
     python ms_checkin.py --probe      # 打印页面判据，排查用
-    python ms_checkin.py --headed     # 本次用有头模式（想亲眼看页面）
     python ms_checkin.py --json       # 额外输出一行 JSON（便于程序消费）
 
-登录态
-------
-登录态存在**独立 CDP profile**（默认 `~/chrome-ms-profile`）里，
-之后每天无头复用，不再需要人工介入。
+前置条件
+--------
+先自己启动一个带调试端口的 Chrome（脚本不会代劳，端口不通时会打印
+可直接复制的命令）：
 
-⚠ 为什么不能用日常 Chrome 的 cookie（实测 2026-10-29）：
-    日常 Chrome 的 modelscope cookie 是 **v20 前缀 = Chrome App-Bound 加密**
-    （Chrome 127+）。解密要过 Chrome 自己的 elevation service，DPAPI 拿
-    Local State 的 key 解不开。且 Chrome 136+ 拒绝在【默认 user-data-dir】
-    上开调试端口。⇒ 唯一可行路径：独立 CDP profile + 人工登录一次。
+    chrome.exe --remote-debugging-port=9333 \
+      --user-data-dir=<独立 profile 目录> https://www.modelscope.cn/magicube/usage
+
+⚠ 独立 profile 是 Chrome 136+ 的官方要求（默认 user-data-dir 不允许开调试
+  端口），也因此登录态与日常 Chrome 自然分开。日常 Chrome 里的会话数据
+  本脚本既不读也不需要。
 
 状态机（别把 UNKNOWN 当失败，也别把 ALREADY 当新领取）
 --------------------------------------------------
     CLAIMED  点了「领取」且余额增加（记 before → after）      退出码 0
     ALREADY  没点到按钮，但页面写着「今日已完成 / 今日已领」   退出码 0
-    NO_LOGIN profile 里没有魔搭会话 → 需要重跑 --login        退出码 2
+    NO_LOGIN 浏览器里没有魔搭会话 → 需要重新登录一次          退出码 2
     UNKNOWN  读不到判据：没找到领取入口 / 点了但余额没变       退出码 3
 """
 import argparse
@@ -516,15 +531,11 @@ def main():
     ap = argparse.ArgumentParser(
         description="魔搭魔粒每日自动领取（CDP 真点页面）")
     ap.add_argument("--login", action="store_true",
-                    help="起有头 Chrome 供人工登录并自动验证（登录态失效时用）")
+                    help="人工登录并自动验证（登录态失效时用）")
     ap.add_argument("--status", action="store_true",
                     help="只查余额与登录态，不点领取")
     ap.add_argument("--probe", action="store_true",
                     help="打印页面判据，不写日志")
-    ap.add_argument("--headed", action="store_true",
-                    help="本次用有头模式（默认无头）")
-    ap.add_argument("--keep", action="store_true",
-                    help="跑完不关 Chrome")
     ap.add_argument("--wait", type=int, default=300,
                     help="--login 时等待登录的秒数（默认 300）")
     ap.add_argument("--port", type=int, default=PORT,
@@ -540,13 +551,13 @@ def main():
                    ("ProgramFiles", r"C:\Program Files")):
         os.environ.setdefault(_k, _v)
 
-    headless = not (args.headed or args.login)
-
-    if args.login:
-        proc, launched = M.ensure_chrome(headless=False, port=args.port,
-                                         url=USAGE_URL, profile=args.profile)
-        cdp = M.CDP(port=args.port)
-        try:
+    # ✅ 只连接用户自己开着的 Chrome；端口不通时由 ensure_chrome 打印
+    #    可直接复制的启动命令，脚本不代为 spawn / 结束浏览器进程。
+    proc, launched = M.ensure_chrome(port=args.port,
+                                     url=USAGE_URL, profile=args.profile)
+    cdp = M.CDP(port=args.port)
+    try:
+        if args.login:
             res = do_login(cdp, wait_seconds=args.wait)
             append_log({"state": res["state"], "balance": res["balance"],
                         "before": res["balance"], "delta": None,
@@ -555,18 +566,7 @@ def main():
             if args.json:
                 log("[json] %s" % json.dumps(res, ensure_ascii=False))
             return 0 if res["state"] == "LOGGED_IN" else 2
-        finally:
-            if launched and not args.keep:
-                M.stop_chrome(cdp, proc)
-            elif launched:
-                log("[ms] --keep：保留 Chrome (pid=%s)" % proc.pid)
-            else:
-                log("[ms] 复用已有 Chrome，不关闭")
 
-    proc, launched = M.ensure_chrome(headless=headless, port=args.port,
-                                     url="about:blank", profile=args.profile)
-    cdp = M.CDP(port=args.port)
-    try:
         if args.probe:
             return do_probe(cdp)
 
@@ -613,15 +613,9 @@ def main():
             log("[json] %s" % json.dumps(entry, ensure_ascii=False))
         return rc
     finally:
-        # ⚠ 只关「本次自己拉起」的 Chrome。若端口上本来就有 Chrome（比如
-        # --login 留下的那个有头窗口/用户日常在用），close_browser 会把人家
-        # 的窗口一起干掉 —— 这是不可接受的副作用。
-        if launched and not args.keep:
-            M.stop_chrome(cdp, proc)
-        elif launched:
-            log("[ms] --keep：保留 Chrome (pid=%s)" % proc.pid)
-        else:
-            log("[ms] 复用已有 Chrome，不关闭")
+        # ✅ 只断开 CDP 连接，**不结束任何浏览器进程**。
+        #    浏览器窗口归用户所有 —— 脚本无权替他关掉。
+        M.stop_chrome(cdp, proc)
 
 
 if __name__ == "__main__":

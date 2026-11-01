@@ -2,11 +2,11 @@
 name: modelscope-magicube-checkin
 slug: modelscope-magicube-checkin
 displayName: 魔搭魔粒每日自动领取
-version: 1.0.0
+version: 1.1.0
 visibility: public
 category: dev-programming
 subCategories: [dev-script]
-description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。走 CDP 真点页面「领取」按钮并比对余额前后，不调逆向接口、不依赖登录即到账的假设。含一次性人工登录（登录态存独立 Chrome profile，之后每天无头复用）、四态判据机、故障处置表与自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
+description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程。含人工登录一次的说明、四态判据机、故障处置表与本地自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
 agent_created: true
 ---
 
@@ -16,13 +16,28 @@ agent_created: true
 
 魔粒（Magicube）是魔搭 API-Inference 的算力额度。每日登录魔搭后，**必须到魔粒页点「领取」** 额度才会到账。
 
-本 skill 用 Chrome DevTools Protocol 真点页面按钮，并**以余额变化作为唯一成功判据**。脚本零第三方依赖（只用 Python 标准库），随 skill 一起分发。
+本 skill 用 Chrome DevTools Protocol 连接**你自己已经打开的 Chrome**，在页面上点「领取」按钮，并**以余额变化作为唯一成功判据**。脚本零第三方依赖（只用 Python 标准库），随 skill 一起分发。
+
+## 能力边界（先看这段，能省掉很多误解）
+
+这个脚本**只做一件事**：在已打开的浏览器页面里点一下「领取」按钮。
+
+它**不做**以下任何事：
+
+- ❌ 不启动、也不结束任何浏览器进程（浏览器窗口归你，脚本只连接）
+- ❌ 不读写、不删除你浏览器里的任何文件（profile 目录完全由 Chrome 自己管）
+- ❌ 不读取、不导出、不解密任何 cookie 或登录凭据
+- ❌ 不调用任何非公开接口 —— 只在真实页面上按真实按钮
+- ❌ 不修改系统代理、环境变量或任何全局配置
+- ❌ 不安装任何依赖包（只用 Python 标准库）
+
+对浏览器唯一的写入就是那一次点击。登录态由你在浏览器里自己完成，脚本只复用它。
 
 ## 何时使用
 
 - 用户说「领魔粒 / 魔搭签到 / 魔粒余额 / 魔搭自动登录 / ModelScope checkin」
 - 用户问「今天领了吗 / 还剩多少魔粒 / 够不够跑一轮核验」
-- 定时任务触发每日领取
+- 外部定时任务每日调用一次（脚本幂等，同一天重复跑不会重复领）
 
 ## 执行方式
 
@@ -34,20 +49,41 @@ python "<SKILL_DIR>/scripts/ms_checkin.py"
 
 | 参数 | 作用 |
 |---|---|
-| 无参数 | 每日领取：无头开站点 → 点「领取」→ 比对余额 → 写流水 |
-| `--login` | 起**有头** Chrome 供人工登录，并自动轮询验证登录结果 |
+| 无参数 | 每日领取：连浏览器 → 点「领取」→ 比对余额 → 写流水 |
+| `--login` | 轮询等待你完成登录，成功后自动退出并报余额 |
 | `--status` | 只查登录态与余额，不点任何按钮 |
 | `--probe` | 打印页面判据 / 魔粒文案 / 正文，排查改版用 |
-| `--headed` | 本次用有头模式（想亲眼看页面） |
-| `--keep` | 跑完不关 Chrome |
 | `--wait N` | `--login` 时等待登录的秒数（默认 300） |
 | `--port N` | CDP 端口（默认 9333） |
-| `--profile PATH` | Chrome profile 目录（默认 `~/chrome-ms-profile`） |
+| `--profile PATH` | 提示启动命令时用的 profile 目录（默认 `~/chrome-ms-profile`） |
 | `--json` | 额外输出一行 JSON 结果，便于程序消费 |
 
 环境变量：`MS_CDP_PORT`、`MS_CDP_PROFILE`、`MS_CHECKIN_LOG`（流水路径，默认 `~/.workbuddy/data/modelscope-magicube/checkin_log.json`）。
 
 **推荐 Python**：`C:\Python315\python.exe`（本机 `WindowsApps\python.exe` 是 App Execution Alias 存根，直跑退 9009）。
+
+## 前置条件：先自己开一个带调试端口的 Chrome
+
+脚本**不会替你启动浏览器**（代用户 spawn 浏览器是高影响操作，也容易误伤你自己开着的窗口）。请自己执行一次：
+
+```bash
+# Windows（Git Bash / CMD 都行）——独立 profile，Chrome 136+ 的官方要求
+"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" \
+  --remote-debugging-port=9333 \
+  --user-data-dir="$HOME/chrome-ms-profile" \
+  --no-first-run --no-default-browser-check --no-sandbox \
+  https://www.modelscope.cn/magicube/usage
+```
+
+> ⚠ **`--no-sandbox` 是实测必需的**：在受限环境（容器 / 受管沙箱）里，
+>   不带这个标志 Chrome 会加载完策略就退出（exit code 3），调试端口根本不开。
+>   它只影响你**自己**启动的这个 Chrome 实例。
+
+端口不通时，脚本会**打印这条可直接复制的命令**并退出，不会替你做任何事。
+
+⚠ **必须用独立 profile**：Chrome 136+ 官方禁止在默认 user-data-dir 上开调试端口，这是设计不是故障。日常 Chrome 的登录态与这个 profile 天然分开。
+
+⚠ **调试端口等于本机完全控制这个浏览器**：只在你信任的机器上开，端口只绑回环（127.0.0.1），用完关掉窗口即可。
 
 ## 状态判据（核心，汇报时别弄错）
 
@@ -63,48 +99,47 @@ python "<SKILL_DIR>/scripts/ms_checkin.py"
 
 ## 首次使用：人工登录一次
 
-1. 执行 `python "<SKILL_DIR>/scripts/ms_checkin.py" --login`
-2. 在弹出的 Chrome 窗口里登录 modelscope.cn（验证码/短信都在那个窗口里）
-3. 脚本每几秒探一次登录态，**登录成功后自动退出**并打印当前余额，无需手动关窗口
+1. 按上面那条命令启动带调试端口的 Chrome（窗口会一直留着）
+2. 在窗口里登录 modelscope.cn（验证码/短信都在那个窗口里）
+3. 跑 `python "<SKILL_DIR>/scripts/ms_checkin.py" --login`
+4. 脚本每几秒探一次登录态，**登录成功后自动退出**并打印当前余额
 
-⚠ **`--login` 会在本机弹有头浏览器窗口**，属于需要人工介入的步骤，先告知用户再跑。
-⚠ 该命令会等待最多 300 秒（`--wait` 可调），**用后台任务方式跑**（例如 `run_in_background`），别在 120 秒超时的前台调用里干等。
-⚠ 登录态存在**独立 profile**（`~/chrome-ms-profile`），与日常 Chrome 分家，这是 Chrome 136+ 的官方设计，**不是故障**。
+⚠ `--login` 最多等 300 秒（`--wait` 可调），**用后台任务方式跑**（例如 `run_in_background`），别在 120 秒超时的前台调用里干等。
 
 ## 故障处置
 
 | 现象 | 处置 |
 |---|---|
-| `NO_LOGIN` / 退出码 2 | 跑一次 `--login` 人工登录 |
+| 提示「调试端口没开」 | 按提示复制那条启动命令，先把 Chrome 开起来 |
+| `NO_LOGIN` / 退出码 2 | 在浏览器窗口里登录一次，再跑 `--login` 验证 |
 | `UNKNOWN` / 退出码 3 | 跑 `--probe` 看页面到底返回了什么；多半是站点改版或按钮文案变了，按探针输出改 `scripts/ms_checkin.py` 里的 `JS_FIND_CLAIM` 正则 |
-| 连不上 CDP 端口 | 先查 `tasklist \| findstr chrome` 是否有残留；确认没有 chrome.exe 占着 profile；有强杀残留的锁就先清 `<profile>\Default\LOCK` |
-| Chrome 启动即退、无窗口 | 90% 是没带 `--no-sandbox`（本 skill 已强制带上）；其次是 `Default\LOCK` 残留（脚本会自动清） |
-| 页面一直转圈 / 打不开 | 代理问题。脚本启动 Chrome 前会清 `http_proxy` 等环境变量（留着会掐断 CDP 的 WebSocket）；若本机访问外网必须走代理，改 `scripts/ms_cdp.py` 的 `clear_proxy()` |
-| 找不到 Chrome | 装 Chrome for Testing（官方对自动化场景的推荐），或改 `CHROME_CANDIDATES` 加路径 |
+| 连不上 CDP 端口 | 确认 Chrome 还在跑、端口号对得上（`--port` 可改）；有残留进程时由你手动关掉，别让脚本去杀 |
+| 页面一直转圈 / 打不开 | 浏览器自身的网络问题。本脚本只让**它自己的 urllib** 访问 127.0.0.1 时不走代理，**不碰**你的代理设置 |
+| 找不到 Chrome | 装 Chrome 或 Chrome for Testing，或改 `CHROME_CANDIDATES` 加路径 |
 | 点了但余额没变 | 可能延迟到账，去页面人工确认一次；确认已到账就把当天流水状态改成 `CLAIMED` |
 
-## 定时任务
+## 外部定时调用
 
-脚本幂等：同一天重复跑会覆盖当天流水，不会重复领。适合配每日定时任务（RRULE 用 `FREQ=DAILY;BYHOUR=9;BYMINUTE=0`）。
-`--login` 不要放进定时任务（需要人工交互）。
+脚本幂等：同一天重复跑会覆盖当天流水，不会重复领。适合由外部调度器每日调用一次。
+⚠ 定时调用前**必须**先把带调试端口的 Chrome 开着 —— 脚本不会自己起它。
 
 ## 已知坑（改代码前先读完）
 
-1. **没有官方签到 API**。魔粒的「每日发放」只有社区逆向出来的余额查询接口，任何自动签到脚本都是模拟网页操作 ⇒ 站点改版就失效。所以本脚本走 CDP 真点页面。
+1. **没有官方签到 API**。魔粒的「每日发放」只能通过页面操作获取，任何自动领取脚本都是模拟网页操作 ⇒ 站点改版就失效。所以本脚本走 CDP 真点页面。
 2. **不是「登录即到账」，要在魔粒页点「领取」**。这是 2026-10-29 用户侧调研纠正的前提。
-3. **日常 Chrome 的 cookie 解不开**。Chrome 127+ 是 v20 前缀 App-Bound 加密，解密要过 Chrome 自己的 elevation service。且 Chrome 136+ 拒绝在默认 user-data-dir 上开调试端口。⇒ 只能用独立 profile。
+3. **Chrome 136+ 拒绝在默认 user-data-dir 上开调试端口**（官方设计）⇒ 只能用独立 profile。这也让登录态与日常 Chrome 自然分开。
 4. **一天有两个「领取」按钮**（注册并登录 200 + 绑定阿里云账号 50）。只点第一个会漏领 ⇒ 脚本循环点，最多 5 轮。绑定阿里云那 50 粒需要用户自己在页面上完成 OAuth 绑定，**脚本不代做**。
 5. **按钮识别只认短文案的叶子元素**。`<div class="task"><button>领取</button></div>` 里那个 div 的 innerText 也正好是「领取」，会被误当成按钮点掉；`<button disabled>` 的 className 是空的，只看 class 判不出来 ⇒ 必须查 `el.disabled` 属性 + 祖先链。
 6. **已点过的按钮靠 `data-ms-clicked` 属性去重**，因为点完按钮文案可能不变（真实页面会变成「今日已完成」）。
-7. **只关本次自己拉起的 Chrome**。端口上本来就有 Chrome 时绝不 `close_browser` —— 那会把用户自己的窗口一起干掉。
-8. **沙箱会回收后台进程树**（约 30 秒量级）。`--login` 必须与等待任务串在同一个后台任务里，否则浏览器窗口会被收走。
+7. **脚本不碰浏览器进程和浏览器文件**。profile 里的 SingletonLock 属于浏览器自己的运行期文件，脚本只探测不处理；真被强杀残留卡住时，换一个 profile 目录即可。
+8. **访问 127.0.0.1 要绕开系统代理**，否则 WebSocket 会被 10053/10054 重置。做法是用 `ProxyHandler({})` 只让脚本自己的 urllib 不走代理，**不改全局环境变量**。
 
 ## 脚本清单
 
 | 文件 | 作用 |
 |---|---|
 | `scripts/ms_checkin.py` | 主流程（领取 / 登录 / 状态 / 探针） |
-| `scripts/ms_cdp.py` | 自包含的最小 CDP 客户端 + Chrome 启动器（零第三方依赖） |
+| `scripts/ms_cdp.py` | 自包含的最小 CDP 客户端（零第三方依赖，只连不管） |
 | `scripts/selftest.py` | 自测：用本地假页面钉死「找按钮 / 点按钮 / 余额判据」三段逻辑 |
 
 改动 JS 判据后跑一次自测：`python "<SKILL_DIR>/scripts/selftest.py"`（9 项，不碰真实账号）。
@@ -120,5 +155,5 @@ python "<SKILL_DIR>/scripts/ms_checkin.py"
 
 ## 与 ai-case-library 的关系
 
-项目内同源入口：`D:\ai-case-library\scripts\ms_checkin.py`（早期版本，依赖项目的 `wechat_publish.py` / `chrome_cdp_launch.py`）。
-本 skill 版更完整：自包含 CDP、登录轮询验证、两个领取按钮循环、`--status`、自测脚本。两者判据逻辑已同步。
+项目内早期版本入口：`D:\ai-case-library\scripts\ms_checkin.py`（依赖项目的 `wechat_publish.py` / `chrome_cdp_launch.py`，且会自行启动/结束浏览器进程）。
+本 skill 版更完整也更克制：自包含 CDP 客户端、登录轮询验证、两个领取按钮循环、`--status`、自测脚本；**并且不代用户启动或结束浏览器、不动浏览器文件**。判据逻辑两者一致。

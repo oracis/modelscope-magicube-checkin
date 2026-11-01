@@ -3,14 +3,28 @@
 > 魔搭（ModelScope）每日魔粒自动领取 Skill —— 真点页面、以余额变化为唯一成功判据。
 
 魔粒（Magicube）是魔搭 API-Inference 的算力额度。**登录魔搭不等于到账** —— 必须到魔粒页点「领取」，额度才会进余额。
-本 Skill 用 Chrome DevTools Protocol 真点页面按钮，并**以余额前后差值作为唯一成功判据**。脚本零第三方依赖（只用 Python 标准库）。
+本 Skill 用 Chrome DevTools Protocol 连接**你自己已经打开的 Chrome**，在页面上点「领取」按钮，并**以余额前后差值作为唯一成功判据**。脚本零第三方依赖（只用 Python 标准库）。
 
 - **判据不造假**：必须「点了 + 余额真的变了」才算领到。只判「页面读得到余额」是典型的假绿（日志天天 OK，额度一分没多）
 - **零依赖**：只用 Python 标准库（自带最小 WebSocket + CDP 客户端），无需 `pip install`
-- **不碰凭据**：复用你自己浏览器里的一次性登录态，脚本不存密码、不做网络登录
 - **两按钮连点**：一天有「注册并登录 200」+「绑定阿里云 50」两个领取按钮，只点一个会漏领
 - **四态可判**：`CLAIMED` / `ALREADY` / `NO_LOGIN` / `UNKNOWN`，退出码区分，漏跑无副作用
 - **带自测**：9 项本地自测钉死「找按钮 / 点按钮 / 余额判据」三段逻辑，改 JS 判据后可回归
+
+## 能力边界（先看这段，能省掉很多误解）
+
+这个脚本**只做一件事**：在已打开的浏览器页面里点一下「领取」按钮。
+
+它**不做**以下任何事：
+
+- ❌ 不启动、也不结束任何浏览器进程（浏览器窗口归你，脚本只连接）
+- ❌ 不读写、不删除你浏览器里的任何文件（profile 目录完全由 Chrome 自己管）
+- ❌ 不读取、不导出、不解密任何 cookie 或登录凭据
+- ❌ 不调用任何非公开接口 —— 只在真实页面上按真实按钮
+- ❌ 不修改系统代理、环境变量或任何全局配置
+- ❌ 不安装任何依赖包（只用 Python 标准库）
+
+对浏览器唯一的写入就是那一次点击。登录态由你在浏览器里自己完成，脚本只复用它。
 
 ## 效果
 
@@ -61,19 +75,34 @@ bash install.sh              # macOS / Linux / Git Bash
 python modelscope-magicube-checkin/scripts/ms_checkin.py --status
 ```
 
+## 前置条件：先自己开一个带调试端口的 Chrome
+
+脚本**不会替你启动浏览器**（代用户 spawn 浏览器是高影响操作，也容易误伤你自己开着的窗口）。请自己执行一次：
+
+```bash
+# Windows（Git Bash / CMD 都行）——独立 profile，Chrome 136+ 的官方要求
+"$LOCALAPPDATA\Google\Chrome\Application\chrome.exe" \
+  --remote-debugging-port=9333 \
+  --user-data-dir="$HOME/chrome-ms-profile" \
+  --no-first-run --no-default-browser-check https://www.modelscope.cn/magicube/usage
+```
+
+端口不通时，脚本会**打印这条可直接复制的命令**并退出，不会替你做任何事。
+
+> ⚠ **调试端口等于本机完全控制这个浏览器**：只在你信任的机器上开，端口只绑回环（127.0.0.1），用完关掉窗口即可。
+>
+> ⚠ **必须用独立 profile**：Chrome 136+ 官方禁止在默认 user-data-dir 上开调试端口，这是设计不是故障。日常 Chrome 的登录态与这个 profile 天然分开。
+
 ## 首次使用：人工登录一次
 
 魔搭登录要验证码/短信，绕不过，必须人工一次：
 
-```bash
-python modelscope-magicube-checkin/scripts/ms_checkin.py --login
-```
+1. 按上面那条命令启动带调试端口的 Chrome（窗口会一直留着）
+2. 在窗口里登录 modelscope.cn
+3. 跑 `python modelscope-magicube-checkin/scripts/ms_checkin.py --login`
+4. 脚本每几秒探一次登录态，**登录成功自动退出**并打印余额
 
-会弹出**有头** Chrome 窗口 → 登录 modelscope.cn → 脚本每几秒探一次登录态，**登录成功自动退出**并打印余额。
-
-> ⚠ 登录态存在**独立 profile**（默认 `~/chrome-ms-profile`），与日常 Chrome 分家 —— 这是 Chrome 136+ 的官方设计（默认 user-data-dir 不允许开调试端口），不是故障。
-
-之后每天无头跑即可：
+之后每天跑一次即可：
 
 ```bash
 python modelscope-magicube-checkin/scripts/ms_checkin.py
@@ -83,15 +112,13 @@ python modelscope-magicube-checkin/scripts/ms_checkin.py
 
 | 参数 | 作用 |
 |---|---|
-| 无参数 | 每日领取：无头开站点 → 点「领取」→ 比对余额 → 写流水 |
-| `--login` | 起有头 Chrome 供人工登录，并自动轮询验证登录结果 |
+| 无参数 | 每日领取：连浏览器 → 点「领取」→ 比对余额 → 写流水 |
+| `--login` | 轮询等待你完成登录，成功后自动退出 |
 | `--status` | 只查登录态与余额，**不点任何按钮** |
 | `--probe` | 打印页面判据 / 魔粒文案 / 正文，排查站点改版用 |
-| `--headed` | 本次用有头模式 |
-| `--keep` | 跑完不关 Chrome |
 | `--wait N` | `--login` 时等待登录的秒数（默认 300） |
 | `--port N` | CDP 端口（默认 9333） |
-| `--profile PATH` | Chrome profile 目录（默认 `~/chrome-ms-profile`） |
+| `--profile PATH` | 提示启动命令时用的 profile 目录（默认 `~/chrome-ms-profile`） |
 | `--json` | 额外输出一行 JSON 结果 |
 
 ## 状态判据
@@ -104,10 +131,10 @@ python modelscope-magicube-checkin/scripts/ms_checkin.py
 | `NO_LOGIN` | 页面仍有「登录 / 注册」入口 | 2 |
 | `UNKNOWN` | 没拿到判据（站点改版 / 页面没渲染完） | 3 |
 
-## 定时任务
+## 外部定时调用
 
-脚本幂等：同一天重复跑会覆盖当天流水，不会重复领。适合配每日定时任务。
-`--login` **不要**放进定时任务（需要人工交互）。
+脚本幂等：同一天重复跑会覆盖当天流水，不会重复领。适合由外部调度器每日调用一次。
+⚠ 定时调用前**必须**先把带调试端口的 Chrome 开着 —— 脚本不会自己起它。
 
 ## 依赖
 
@@ -126,11 +153,11 @@ python modelscope-magicube-checkin/scripts/selftest.py
 
 | 现象 | 处置 |
 |---|---|
-| 退出码 2（`NO_LOGIN`） | 跑一次 `--login` 人工登录 |
+| 提示「调试端口没开」 | 按提示复制那条启动命令，先把 Chrome 开起来 |
+| 退出码 2（`NO_LOGIN`） | 在浏览器窗口里登录一次，再跑 `--login` 验证 |
 | 退出码 3（`UNKNOWN`） | 跑 `--probe` 看页面实际返回；多半是站点改版，按探针输出改 `JS_FIND_CLAIM` 正则 |
-| 连不上 CDP 端口 | 查 `tasklist \| findstr chrome` 有无残留；强杀残留的锁由脚本自动清理 |
-| Chrome 启动即退 | 脚本已强制带 `--no-sandbox`；其次是 profile 锁残留（脚本自动清） |
-| 页面一直转圈 | 代理问题。脚本启动 Chrome 前会清 `http_proxy` 等环境变量（留着会掐断 CDP 的 WebSocket） |
+| 连不上 CDP 端口 | 确认 Chrome 还在跑、端口号对得上（`--port` 可改） |
+| 页面一直转圈 | 浏览器自身的网络问题。脚本只让它自己的 urllib 访问 127.0.0.1 时不走代理，不碰你的代理设置 |
 | 点了但余额没变 | 可能延迟到账，人工到页面确认一次 |
 
 ## 背景：魔粒体系

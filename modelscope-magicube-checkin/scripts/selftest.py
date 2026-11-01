@@ -18,12 +18,13 @@
 import json
 import os
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ms_cdp as M      # noqa: E402
 import ms_checkin as C  # noqa: E402
+
+SELFTEST_PORT = 9334
 
 FIXTURE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>fake</title></head>
@@ -66,13 +67,18 @@ def check(name, cond, extra=""):
 
 
 def main():
-    fd, path = tempfile.mkstemp(suffix=".html")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    # 假页面写到脚本同目录下的固定文件名（不是系统临时目录），
+    # 跑完删掉。选固定路径是为了让「写了什么、在哪」一目了然。
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "_selftest_fixture.html")
+    with open(path, "w", encoding="utf-8") as f:
         f.write(FIXTURE)
     url = "file:///" + path.replace("\\", "/")
 
-    proc, launched = M.ensure_chrome(headless=True, port=9334, url="about:blank")
-    cdp = M.CDP(port=9334)
+    # 连接一个已经开着调试端口的 Chrome（端口 9334）。
+    # 若没开，ensure_chrome 会打印可直接复制的启动命令并退出。
+    proc, launched = M.ensure_chrome(port=SELFTEST_PORT, url="about:blank")
+    cdp = M.CDP(port=SELFTEST_PORT)
     try:
         t = cdp.new_target(url)
         cdp.connect_target(t["id"])
@@ -120,8 +126,7 @@ def main():
         txt = str(cdp.eval(C.JS_CLAIMED_TEXT) or "")
         check("认得「今日已完成」", "今日已完成" in txt, repr(txt))
     finally:
-        if launched:
-            M.stop_chrome(cdp, proc)
+        M.stop_chrome(cdp, proc)
         try:
             os.remove(path)
         except Exception:
