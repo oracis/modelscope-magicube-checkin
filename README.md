@@ -4,6 +4,7 @@
 
 **已上架**：
 - SkillHub（腾讯主市场）→ `https://skillhub.cn/skills/modelscope-magicube-checkin`（v1.1.0，已过审）
+- ClawHub（海外市场）→ `https://clawhub.ai/skills/oracis/modelscope-magicube-checkin`（v1.1.0）
 - GitHub 源码 → 本仓库
 
 魔粒（Magicube）是魔搭 API-Inference 的算力额度。**登录魔搭不等于到账** —— 必须到魔粒页点「领取」，额度才会进余额。
