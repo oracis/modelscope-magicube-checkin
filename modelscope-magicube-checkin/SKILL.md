@@ -2,7 +2,7 @@
 name: modelscope-magicube-checkin
 slug: modelscope-magicube-checkin
 displayName: 魔搭魔粒每日自动领取
-version: 1.3.0
+version: 1.3.1
 visibility: public
 category: dev-programming
 subCategories: [dev-script]
