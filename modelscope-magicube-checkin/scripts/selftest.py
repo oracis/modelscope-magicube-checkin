@@ -24,7 +24,28 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ms_cdp as M      # noqa: E402
 import ms_checkin as C  # noqa: E402
 
-SELFTEST_PORT = 9334
+SELFTEST_PORT = int(os.environ.get("SELFTEST_PORT", "9334"))
+
+# 🔒 假 host 切换脚本（**仅自测用**）。
+#
+# 😨 为什么需要它：自测的假页面是 file:// 协议，`location.hostname` 恒为空串，
+#   而点击前的 host 闸会拒绝空 host ⇒ 没法直接测「魔搭页能点」。
+#   反过来，file:// 也没法测「页面被导航走后还在点」这个**最危险的场景**。
+#
+#   ⇒ 让测试能在**同一个真实页面**上随时把 host 切成
+#     「www.modelscope.cn」或「evil.example.com」，从而真实验证：
+#       · host = 魔搭   ⇒ 正常点
+#       · host = 第三方 ⇒ **一个按钮都不能点**
+#
+#   ⚠ 走 `window.__msCurrentHost` 通道，而不是改 `Location.prototype.hostname`
+#     —— 实测后者**不生效**：Chrome 对 Location 的属性有内部优先绑定，
+#     覆盖 prototype 上的 getter 后 `location.hostname` 仍返回原值。
+#   ⚠ 生产路径不依赖它：正常页面上 `window.__msCurrentHost` 不存在 ⇒
+#     走真实 `location.hostname`（见 ms_checkin._JS_HOST_GUARD 的说明）。
+JS_SET_FAKE_HOST = (
+    "window.__msCurrentHost = %s; "
+    "String(window.__msCurrentHost || '');"
+)
 
 FIXTURE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>fake</title></head>
@@ -75,14 +96,30 @@ def main():
         f.write(FIXTURE)
     url = "file:///" + path.replace("\\", "/")
 
-    # 连接一个已经开着调试端口的 Chrome（端口 9334）。
+    # 连接一个已经开着调试端口的 Chrome（端口 SELFTEST_PORT，默认 9334）。
     # 若没开，ensure_chrome 会打印可直接复制的启动命令并退出。
     proc, launched = M.ensure_chrome(port=SELFTEST_PORT, url="about:blank")
     cdp = M.CDP(port=SELFTEST_PORT)
+    my_target_id = None
     try:
-        t = cdp.new_target(url)
+        t = cdp.new_target("about:blank")
+        my_target_id = t["id"]
         cdp.connect_target(t["id"])
-        time.sleep(2)
+
+        def load_page(fake_host):
+            """重新加载假页面，并把假 host 设成 fake_host。
+
+            ⚠ 每次导航后都要**重设** —— 导航会换执行上下文，
+            新文档的 window 上没有 __msCurrentHost。
+            """
+            cdp.send("Page.navigate", {"url": url})
+            time.sleep(1.5)
+            cdp.eval(JS_SET_FAKE_HOST % json.dumps(fake_host),
+                     refresh_context=True)
+            time.sleep(0.3)
+
+        # 默认假装自己在魔搭上（否则 host 闸会把所有点击都拒掉）
+        load_page("www.modelscope.cn")
 
         # 1) 余额判据
         info = json.loads(cdp.eval(C.JS_AUTH, refresh_context=True) or "{}")
@@ -177,7 +214,85 @@ def main():
         # 读不到余额也不能算成功
         st, _, _ = C.classify(None, None, True, "", "今日已完成", ["领取"])
         check("余额读不到 ⇒ 不是 CLAIMED", st != "CLAIMED", st)
+
+        # ================================================================
+        # 11) 🚨🚨 原子 host 闸（**在真实浏览器里验**）
+        #
+        # 这是 2026-11-02 ClawHub 安全扫描点名的那条：
+        #   "it can continue clicking after a browser tab leaves ModelScope"
+        # 早先的实现是「Python 侧校验一次 + 每轮 find/click 两次 evaluate」，
+        # 校验和点击之间存在窗口 ⇒ 用户中途把标签页导航走，脚本还在点。
+        # 现在改成**一次 evaluate** 内完成「校验 → 找 → 点」，
+        # 这里用「把假 hostname 切走」来真实验证它。
+        # ================================================================
+        guard_js = C.JS_CLAIM_AND_CLICK % (C._JS_PRELUDE + C._js_host_guard())
+
+        # 11a) 魔搭页 ⇒ 能点
+        load_page("www.modelscope.cn")
+        bal_before = C._balance_of(
+            json.loads(cdp.eval(C.JS_AUTH, refresh_context=True) or "{}"))
+        r = json.loads(cdp.eval(guard_js) or "{}")
+        check("魔搭页：原子点击成功", r.get("clicked") is True, str(r))
+        time.sleep(0.4)
+        bal_after = C._balance_of(
+            json.loads(cdp.eval(C.JS_AUTH, refresh_context=True) or "{}"))
+        check("魔搭页：余额真的 +50",
+              bal_after is not None and bal_before is not None
+              and bal_after - bal_before == 50.0,
+              "%s -> %s" % (bal_before, bal_after))
+
+        # 11b) 🚨 第三方页 ⇒ **一个按钮都不能点**
+        load_page("evil.example.com")
+        bal_before = C._balance_of(
+            json.loads(cdp.eval(C.JS_AUTH, refresh_context=True) or "{}"))
+        r = json.loads(cdp.eval(guard_js) or "{}")
+        check("第三方页：拒绝点击", r.get("clicked") is False, str(r))
+        check("第三方页：reason=host_denied", r.get("reason") == "host_denied",
+              str(r))
+        time.sleep(0.4)
+        bal_after = C._balance_of(
+            json.loads(cdp.eval(C.JS_AUTH, refresh_context=True) or "{}"))
+        check("第三方页：余额纹丝不动（一个按钮都没点）",
+              bal_after == bal_before,
+              "%s -> %s" % (bal_before, bal_after))
+
+        # 11c) 后缀拼接攻击：evil-modelscope.cn 也不该放行
+        load_page("evil-modelscope.cn")
+        r = json.loads(cdp.eval(guard_js) or "{}")
+        check("后缀拼接 evil-modelscope.cn：拒绝点击",
+              r.get("clicked") is False, str(r))
+
+        # 11d) 子域劫持：attacker.modelscope.cn.evil.com
+        load_page("attacker.modelscope.cn.evil.com")
+        r = json.loads(cdp.eval(guard_js) or "{}")
+        check("子域劫持：拒绝点击", r.get("clicked") is False, str(r))
+
+        # 11e) 空 hostname（file:// 页面就是这种）⇒ 拒绝
+        load_page("")
+        r = json.loads(cdp.eval(guard_js) or "{}")
+        check("空 hostname：拒绝点击", r.get("clicked") is False, str(r))
+
+        # 11f) 裸域 modelscope.cn 也算魔搭（子域白名单不该过严）
+        load_page("modelscope.cn")
+        r = json.loads(cdp.eval(guard_js) or "{}")
+        check("裸域 modelscope.cn：允许点击", r.get("clicked") is True, str(r))
+
+        # 11g) Python 侧 host 判据与页面内 JS 判据必须一致
+        check("Python 侧 _host_allowed：放行 www.modelscope.cn",
+              C._host_allowed("www.modelscope.cn") is True)
+        check("Python 侧 _host_allowed：拒绝 evil-modelscope.cn",
+              C._host_allowed("evil-modelscope.cn") is False)
+        check("Python 侧 _host_allowed：拒绝空 host",
+              C._host_allowed("") is False)
+        check("Python 侧 _host_allowed：拒绝子域劫持",
+              C._host_allowed("attacker.modelscope.cn.evil.com") is False)
     finally:
+        # ⚠ 只关**自己新建的** target —— 复用现成 Chrome 时绝不能碰用户的页面。
+        if my_target_id:
+            try:
+                cdp.close_target(my_target_id)
+            except Exception:
+                pass
         M.stop_chrome(cdp, proc)
         try:
             os.remove(path)
@@ -188,7 +303,7 @@ def main():
     if FAILED:
         print("✗ %d 项未过：%s" % (len(FAILED), ", ".join(FAILED)))
         return 1
-    print("✓ 自测全过（%d 项）" % 28)
+    print("✓ 自测全过（%d 项）" % 41)
     return 0
 
 

@@ -2,11 +2,11 @@
 name: modelscope-magicube-checkin
 slug: modelscope-magicube-checkin
 displayName: 魔搭魔粒每日自动领取
-version: 1.3.1
+version: 1.3.2
 visibility: public
 category: dev-programming
 subCategories: [dev-script]
-description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据（余额没变一律记 UNKNOWN，不报成功）。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程；只操作 modelscope.cn 域名下的页面，点击前复核页面归属。含人工登录一次的说明、四态判据机、故障处置表与本地自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
+description: 自动领取魔搭（ModelScope）每日发放的魔粒（Magicube）算力额度。通过 Chrome DevTools Protocol 连接你自己已经打开的浏览器，在页面上点击「领取」按钮，并以余额前后差值作为唯一成功判据（余额没变一律记 UNKNOWN，不报成功）。不调用非公开接口，不修改浏览器文件，不启动或结束任何浏览器进程；只操作 modelscope.cn 域名下的页面，点击前在页面内原子复核 host（校验与点击同一次 JS 执行，标签页离开魔搭就一个按钮都不点）。含人工登录一次的说明、四态判据机、故障处置表与本地自测脚本。当用户说「领魔粒」「魔搭签到」「魔粒余额」「魔搭自动登录」「ModelScope checkin」「魔粒够不够」时使用。
 agent_created: true
 ---
 
@@ -35,19 +35,38 @@ agent_created: true
 
 ## 操作范围：只碰魔搭页面
 
-脚本会**在它连上的那个页面上点按钮**，所以「连上哪个页面」必须被约束住。三道闸：
+脚本会**在它连上的那个页面上点按钮**，所以「连上哪个页面」必须被约束住。四道闸：
 
 | 闸 | 位置 | 作用 |
 |---|---|---|
 | 1. 找 tab 时限定 host | `find_target(..., host_suffixes=["modelscope.cn"])` | 只认 `modelscope.cn` 及其子域的 tab |
-| 2. 点击前复核页面归属 | `_assert_page_is_magicube()` | 连上后页面可能被导航走，点之前重新确认 `location.host` |
-| 3. 后缀防拼接 | `_host_matches()` | `evil-modelscope.cn`、`a.modelscope.cn.evil.com` 一律拒绝 |
+| 2. **点击前在页面内复核** | `JS_CLAIM_AND_CLICK` 里的 `hostAllowed()` | **校验与点击在同一次 JS 执行里完成** |
+| 3. 点击后复核 host | `_page_host()` | 点击期间页面被导航走 ⇒ 余额判据作废，记 UNKNOWN |
+| 4. 后缀防拼接 | `_host_matches()` / `hostAllowed()` | `evil-modelscope.cn`、`a.modelscope.cn.evil.com` 一律拒绝 |
+
+### 🚨 为什么第 2 道闸必须写进 JS 里（而不是在 Python 侧检查）
+
+早先的实现是「Python 侧先读一次页面确认 host，再分两步 evaluate 找按钮、点按钮」。
+**校验和点击之间存在时间窗口** —— 用户在这中间把标签页导航到别的站点，
+脚本就会「浏览器已经离开魔搭，却还在继续点」。ClawHub 的安全扫描正是点名了这条：
+> *"it can continue clicking after a browser tab leaves ModelScope"*
+
+现在的写法把三件事合并进**一次** `Runtime.evaluate`：
+
+```
+同一次 JS 执行（中间不 await、不会让出事件循环 ⇒ 不可能被导航打断）
+  ① hostAllowed()   —— 读当前 host，过不了就 return，一个按钮都不点
+  ② 找「领取」按钮
+  ③ 再确认它还是那个按钮 → el.click()
+```
+
+⇒ **不存在「校验时在魔搭、点击时不在魔搭」的窗口**。
 
 host 判定要求「完全相等」或「以 `.` + 域名结尾」，因此 `evil-modelscope.cn` 这种
-后缀拼接骗不过去。
+后缀拼接骗不过去。读不到 host（空串）一律拒绝 —— 宁可误伤也不能在不确定的页面上乱点。
 
 页面归属校验失败时脚本**中止且一个按钮都不点**，返回 `UNKNOWN` 并在 detail 里
-说明当前 URL。
+说明当前 host。
 
 ## 何时使用
 
@@ -171,7 +190,7 @@ python "<SKILL_DIR>/scripts/ms_checkin.py"
 | `scripts/ms_cdp.py` | 自包含的最小 CDP 客户端（零第三方依赖，只连不管） |
 | `scripts/selftest.py` | 自测：用本地假页面钉死「找按钮 / 点按钮 / 余额判据」三段逻辑，另含域名白名单与页面归属校验 |
 
-改动 JS 判据后跑一次自测：`python "<SKILL_DIR>/scripts/selftest.py"`（28 项，不碰真实账号）。
+改动 JS 判据后跑一次自测：`python "<SKILL_DIR>/scripts/selftest.py"`（41 项，不碰真实账号）。
 
 ## 背景：魔粒体系
 

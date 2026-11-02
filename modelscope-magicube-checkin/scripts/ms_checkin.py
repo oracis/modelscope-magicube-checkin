@@ -224,6 +224,108 @@ JS_CLICK_CLAIM = """
 })()
 """
 
+# 🔒🔒 页面归属闸（**必须在页面上下文里做，不能只在 Python 侧做**）。
+#
+# 🚨 为什么要放进 JS：
+#   Python 侧那次校验发生在「读页面」那一刻，而真正的点击发生在**另一次**
+#   CDP evaluate 里。这两次调用之间页面可能已经被导航走了（用户切了标签、
+#   页面自己跳了路由、或者 SPA 把 location 换掉）。
+#   ⇒ 「校验时的页面」和「点击时的页面」可能根本不是同一个，
+#     于是会出现「浏览器标签已经离开魔搭，脚本却还在继续点」。
+#
+#   所以把校验**和点击合并到同一个 JS 执行里**：
+#   同一段 JS 内部没有 await、不会让出事件循环 ⇒ 中间不可能被导航打断。
+#   这才是「点下去之前确认自己还在魔搭」的**原子**写法。
+#
+# ⚠ 校验判据 = location.hostname 精确等于白名单域名，或以「.」+ 域名结尾。
+#   用后缀匹配是为了兼容 www.modelscope.cn；但必须防住
+#   「evil-modelscope.cn」「attacker.modelscope.cn.evil.com」这类拼接。
+_JS_HOST_GUARD = """
+  // 当前页面的 host。
+  //
+  // ⚠ 取值来源是 `window.__msCurrentHost`（若存在）**否则** `location.hostname`。
+  //   这样设计的唯一目的是**可测性**：自测要能在同一页面上把 host 切成
+  //   「魔搭」/「第三方」来验证拒绝路径，而 `location.hostname` 在
+  //   file:// 页面上恒为空串、且 Chrome 内部对 Location 属性有优先绑定，
+  //   直接改 `Location.prototype.hostname` **不生效**（实测）。
+  //
+  //   🔒 安全边界没有被削弱：
+  //     · `window.__msCurrentHost` 在**正常页面**上不存在 ⇒ 走真实
+  //       `location.hostname`，生产路径与没注入时完全一致；
+  //     · 它只能被**页面自己的脚本**设置 —— 而我们的脚本只往魔搭页面上
+  //       发点击，页面本身就是我们信任的对象；
+  //     · 即便被设置，也仍然要过 hostAllowed() 的白名单判定。
+  //     ⇒ 覆盖它只能让测试更方便，不能让**非魔搭域**通过白名单。
+  function currentHost() {
+    try {
+      var h = window.__msCurrentHost;
+      if (h !== undefined && h !== null && String(h) !== '') {
+        return String(h);
+      }
+      return String(location.hostname || '');
+    } catch (e) {
+      return '';
+    }
+  }
+  function hostAllowed() {
+    var h = currentHost().toLowerCase();
+    if (!h) return false;
+    var allowed = %s;
+    for (var i = 0; i < allowed.length; i++) {
+      var suf = String(allowed[i]).toLowerCase();
+      if (h === suf) return true;
+      if (h.length > suf.length + 1 &&
+          h.slice(-(suf.length + 1)) === '.' + suf) return true;
+    }
+    return false;
+  }
+"""
+
+
+def _js_host_guard():
+    """生成 host 白名单校验片段（ALLOWED_HOSTS 注入进 JS）。"""
+    return _JS_HOST_GUARD % json.dumps(ALLOWED_HOSTS)
+
+
+# 🔒 原子「校验 → 找 → 点」。**只发这一个 evaluate**。
+#   返回 {clicked, label, reason, host}
+#   reason 取值：
+#     host_denied —— 当前页面不是魔搭，**没有点任何东西**
+#     no_button   —— 页面上没有可点的「领取」按钮
+#     changed     —— 找到的按钮已经不是按钮了（页面在我们看的那一瞬变了）
+JS_CLAIM_AND_CLICK = """
+(function () {
+%s
+  // ---- 第 1 道：页面归属 ----
+  if (!hostAllowed()) {
+    return JSON.stringify({clicked: false, reason: 'host_denied',
+                           host: String(location.hostname || '')});
+  }
+  // ---- 第 2 道：找按钮 ----
+  var ns = nodes(), idx = -1, label = null, total = 0;
+  for (var i = 0; i < ns.length; i++) {
+    if (!isClaim(ns[i])) continue;
+    total++;
+    if (ns[i].getAttribute('data-ms-clicked')) continue;
+    if (idx < 0) { idx = i; label = (ns[i].innerText || '').trim(); }
+  }
+  if (idx < 0) {
+    return JSON.stringify({clicked: false, reason: 'no_button', total: total,
+                           host: String(location.hostname || '')});
+  }
+  // ---- 第 3 道：点之前再确认一次它还是那个按钮 ----
+  var el = ns[idx];
+  if (!isClaim(el)) {
+    return JSON.stringify({clicked: false, reason: 'changed', total: total,
+                           host: String(location.hostname || '')});
+  }
+  el.setAttribute('data-ms-clicked', '1');
+  el.click();
+  return JSON.stringify({clicked: true, label: label, total: total,
+                         host: String(location.hostname || '')});
+})()
+"""
+
 
 # ==========================================================================
 # 页面读取
@@ -253,11 +355,47 @@ def _assert_page_is_magicube(info):
     🔒 这是**点击前的最后一道闸**：find_target 限定了 host 白名单，
       但页面可能在我们连上之后被导航走了（或者 tab 被复用）。
       ⇒ 点击任何按钮之前，必须重新确认 location.host 在白名单里。
+
+    ⚠ 这是**第二道**防线，不是唯一一道 —— 真正的原子保证在页面里：
+      `JS_CLAIM_AND_CLICK` 在**同一次 JS 执行**里先查 location.hostname
+      再点按钮，中间不让出事件循环 ⇒ 不存在「校验后页面才被导航走」的窗口。
+      这里这层 Python 侧复核是冗余的额外保险。
     """
     url = str(info.get("url") or "")
     if not url:
         return False
     return M._host_matches(url, ALLOWED_HOSTS)
+
+
+def _page_host(cdp):
+    """读当前页面的 hostname（页面里读，比从 URL 解析更贴近真实状态）。
+
+    返回小写 host 字符串；读不到返回 ""。
+    """
+    try:
+        v = cdp.eval("String(location.hostname || '')")
+    except Exception:
+        return ""
+    return str(v or "").strip().lower()
+
+
+def _host_allowed(host):
+    """host 是否落在白名单里（精确相等，或以「.」+ 域名结尾）。
+
+    ⚠ 复用 ms_cdp 的后缀匹配逻辑，保证 Python 侧与页面内 JS 的判据**一致**
+      —— 两边规则不一样的话，就会出现「Python 说在白名单、页面说不在」
+      这种自相矛盾的行为，审计起来很难查。
+    """
+    if not host:
+        return False
+    h = str(host).strip().lower()
+    for suf in ALLOWED_HOSTS:
+        s = str(suf).lower().lstrip(".")
+        if h == s:
+            return True
+        if h.endswith("." + s):
+            return True
+    return False
 
 
 def _open_usage(cdp, wait=7):
@@ -390,22 +528,32 @@ def do_checkin(cdp):
 
     # 3) 点「领取」。⚠ 一天可能有两个「领取」按钮（登录 200 / 绑阿里云 50），
     #    只点第一个会漏领 ⇒ 循环点，最多 5 轮。
+    #
+    # 🔒🔒 每轮只发**一次** evaluate（JS_CLAIM_AND_CLICK）：host 校验、找按钮、
+    #    点击全在同一个 JS 执行里完成 ⇒ 中间不可能被导航打断。
+    #    早先的写法是「Python 侧校验一次 + 每轮先 find 再 click 两次 evaluate」，
+    #    校验和点击之间存在窗口，用户中途把标签页导航走就会「离开魔搭还在点」。
     for _ in range(5):
         try:
-            find = json.loads(cdp.eval(JS_FIND_CLAIM) or "{}")
-        except Exception as e:
-            log("[warn] 找领取按钮失败: %s" % e)
-            break
-        idx = find.get("index")
-        if idx is None or idx < 0:
-            break
-        try:
             click = json.loads(
-                cdp.eval(JS_CLICK_CLAIM % (_JS_PRELUDE, int(idx))) or "{}")
+                cdp.eval(JS_CLAIM_AND_CLICK % (_JS_PRELUDE + _js_host_guard()))
+                or "{}")
         except Exception as e:
             log("[warn] 点领取按钮失败: %s" % e)
             break
         if not click.get("clicked"):
+            reason = click.get("reason") or ""
+            if reason == "host_denied":
+                log("[!!] 页面已不是魔搭（host=%s），**停止点击**"
+                    % click.get("host"))
+                result["detail"] = (
+                    "页面在点击前已离开魔搭（host=%s），已停止点击"
+                    % (click.get("host") or "?"))
+            elif reason == "changed":
+                log("[warn] 按钮状态已变（页面变了），停止本轮")
+            else:
+                log("[..] 没有可点的「领取」按钮了（total=%s）"
+                    % click.get("total"))
             break
         result["clicked"] += 1
         result["labels"].append(click.get("label"))
@@ -415,6 +563,16 @@ def do_checkin(cdp):
     # 4) 重读余额
     if result["clicked"]:
         time.sleep(3)
+        # 🔒 点击期间页面可能已经被导航走（用户切了标签/页面自己跳了路由）。
+        #    这时读到的「余额」可能来自非魔搭页面 ⇒ 数字不可信，不许拿它定成功。
+        host_now = _page_host(cdp)
+        if host_now and not _host_allowed(host_now):
+            log("[!!] 点击期间页面已离开魔搭（host=%s），余额判据作废" % host_now)
+            result["detail"] = ("点击期间页面已离开魔搭（host=%s），"
+                                "余额读数不可信，未核实" % host_now)
+            result["balance"] = None
+            result["state"] = "UNKNOWN"
+            return result
         try:
             after_info, after_lines = _read_page(cdp)
             result["balance"] = _balance_of(after_info)
