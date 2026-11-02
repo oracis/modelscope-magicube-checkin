@@ -243,29 +243,18 @@ JS_CLICK_CLAIM = """
 _JS_HOST_GUARD = """
   // 当前页面的 host。
   //
-  // ⚠ 取值来源是 `window.__msCurrentHost`（若存在）**否则** `location.hostname`。
-  //   这样设计的唯一目的是**可测性**：自测要能在同一页面上把 host 切成
-  //   「魔搭」/「第三方」来验证拒绝路径，而 `location.hostname` 在
-  //   file:// 页面上恒为空串、且 Chrome 内部对 Location 属性有优先绑定，
-  //   直接改 `Location.prototype.hostname` **不生效**（实测）。
+  // 🔒🔒 **只读 location.hostname，没有任何可被页面改写的取值点**。
   //
-  //   🔒 安全边界没有被削弱：
-  //     · `window.__msCurrentHost` 在**正常页面**上不存在 ⇒ 走真实
-  //       `location.hostname`，生产路径与没注入时完全一致；
-  //     · 它只能被**页面自己的脚本**设置 —— 而我们的脚本只往魔搭页面上
-  //       发点击，页面本身就是我们信任的对象；
-  //     · 即便被设置，也仍然要过 hostAllowed() 的白名单判定。
-  //     ⇒ 覆盖它只能让测试更方便，不能让**非魔搭域**通过白名单。
+  // 🚨 2026-11-02 教训：曾经为了「可测性」加过一个 `window.__msCurrentHost`
+  //   覆盖通道 —— 结果它本身就是一个**后门**：任何页面（包括恶意页面）都能
+  //   把它设成 'www.modelscope.cn' 来伪装自己。ClawHub 的安全评审直接点名：
+  //   *"the skill can be tricked into clicking on another website"*。
+  //   ⇒ **可测性绝不能以削弱安全边界为代价**。
+  //   ⇒ 测试改用「真实域名的假页面」来构造场景（见 selftest.py）。
+  //
+  // ⚠ 读不到 host（空串）一律拒绝 —— 宁可误伤也不能在不确定的页面上乱点。
   function currentHost() {
-    try {
-      var h = window.__msCurrentHost;
-      if (h !== undefined && h !== null && String(h) !== '') {
-        return String(h);
-      }
-      return String(location.hostname || '');
-    } catch (e) {
-      return '';
-    }
+    try { return String(location.hostname || ''); } catch (e) { return ''; }
   }
   function hostAllowed() {
     var h = currentHost().toLowerCase();

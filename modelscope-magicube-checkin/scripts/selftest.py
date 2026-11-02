@@ -26,53 +26,46 @@ import ms_checkin as C  # noqa: E402
 
 SELFTEST_PORT = int(os.environ.get("SELFTEST_PORT", "9334"))
 
-# 🔒 假 host 切换脚本（**仅自测用**）。
+# 🔒 假页面怎么造出来：**真实域名 + 假内容**。
 #
-# 😨 为什么需要它：自测的假页面是 file:// 协议，`location.hostname` 恒为空串，
-#   而点击前的 host 闸会拒绝空 host ⇒ 没法直接测「魔搭页能点」。
-#   反过来，file:// 也没法测「页面被导航走后还在点」这个**最危险的场景**。
+# 🚨 2026-11-02 的两条教训（都来自 ClawHub 安全评审）：
+#   1. 早先给 host 判定加过一个 `window.__msCurrentHost` 覆盖通道 ——
+#      它本身就是一个**后门**：任何页面都能把它设成 'www.modelscope.cn'
+#      来伪装自己。评审原话：*"the skill can be tricked into clicking on
+#      another website"*。
+#      ⇒ **可测性绝不能以削弱安全边界为代价**。
+#      ⇒ 现在生产代码只读 `location.hostname`，**没有任何可被页面改写的取值点**。
+#   2. 早先的自测驱动器会 `subprocess.Popen` **启动** Chrome ——
+#      与「不启动浏览器进程」的对外承诺冲突。评审原话：
+#      *"its optional test launcher exceeds its advertised browser restrictions"*。
+#      ⇒ 自测驱动器现在**只连接**现成的 Chrome，绝不启动。
 #
-#   ⇒ 让测试能在**同一个真实页面**上随时把 host 切成
-#     「www.modelscope.cn」或「evil.example.com」，从而真实验证：
-#       · host = 魔搭   ⇒ 正常点
-#       · host = 第三方 ⇒ **一个按钮都不能点**
-#
-#   ⚠ 走 `window.__msCurrentHost` 通道，而不是改 `Location.prototype.hostname`
-#     —— 实测后者**不生效**：Chrome 对 Location 的属性有内部优先绑定，
-#     覆盖 prototype 上的 getter 后 `location.hostname` 仍返回原值。
-#   ⚠ 生产路径不依赖它：正常页面上 `window.__msCurrentHost` 不存在 ⇒
-#     走真实 `location.hostname`（见 ms_checkin._JS_HOST_GUARD 的说明）。
-JS_SET_FAKE_HOST = (
-    "window.__msCurrentHost = %s; "
-    "String(window.__msCurrentHost || '');"
-)
+# ✅ 现在的做法（两全）：
+#   · 先 `Page.navigate` 到**真实的** `https://<host>/...`（真域名、真 URL）
+#   · 再 `Page.setDocumentContent` 把 DOM 换成假页面（假内容）
+#   ⇒ `location.hostname` 拿到的是**真的** host，不需要任何伪造通道。
+#   ⇒ 假页面不发起任何真实请求 ⇒ 不会打扰真实站点。
 
+# 🔒 假页面。
+#
+# ⚠ 按钮行为用**内联 onclick** 而不是 `<script>` + addEventListener：
+#   `Page.setDocumentContent` 注入的 DOM **不会执行 <script>**，
+#   而 file:// 加载时 <script> 会执行 ⇒ 只有内联 onclick 两种方式都生效。
+#   ⇒ 同一份 FIXTURE 既能走 file:// 也能走 setDocumentContent。
 FIXTURE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>fake</title></head>
 <body>
   <div class="header">我的魔粒</div>
   <div id="bal">100</div>
-  <div class="task"><span>注册并登录</span><button id="b1">领取</button></div>
-  <div class="task"><span>绑定阿里云</span><button id="b2">领取</button></div>
+  <div class="task"><span>注册并登录</span><button id="b1"
+    onclick="document.getElementById('bal').textContent=String(Number(document.getElementById('bal').textContent)+50);this.textContent='今日已完成';">领取</button></div>
+  <div class="task"><span>绑定阿里云</span><button id="b2"
+    onclick="document.getElementById('bal').textContent=String(Number(document.getElementById('bal').textContent)+50);this.textContent='今日已完成';">领取</button></div>
   <div class="task"><span>已完成的项</span><span>今日已完成</span></div>
   <div class="task"><button id="b3" disabled>领取</button></div>
   <div class="noise"><button>领取魔粒奖励中心入口这类长文案不算按钮</button></div>
-  <div class="task"><button id="b4">领取</button></div>
-  <script>
-    function add(n) {
-      document.getElementById('bal').textContent =
-        String(Number(document.getElementById('bal').textContent) + n);
-    }
-    // b1/b2：领完后文案变成「今日已完成」（真实页面行为）
-    function done(id) {
-      add(50);
-      document.getElementById(id).textContent = '今日已完成';
-    }
-    document.getElementById('b1').addEventListener('click', function () { done('b1'); });
-    document.getElementById('b2').addEventListener('click', function () { done('b2'); });
-    // b4：领完文案不变 ⇒ 只能靠 data-ms-clicked 标记去重
-    document.getElementById('b4').addEventListener('click', function () { add(50); });
-  </script>
+  <div class="task"><button id="b4"
+    onclick="document.getElementById('bal').textContent=String(Number(document.getElementById('bal').textContent)+50);">领取</button></div>
 </body></html>
 """
 
@@ -94,7 +87,6 @@ def main():
     path = os.path.join(here, "_selftest_fixture.html")
     with open(path, "w", encoding="utf-8") as f:
         f.write(FIXTURE)
-    url = "file:///" + path.replace("\\", "/")
 
     # 连接一个已经开着调试端口的 Chrome（端口 SELFTEST_PORT，默认 9334）。
     # 若没开，ensure_chrome 会打印可直接复制的启动命令并退出。
@@ -106,19 +98,43 @@ def main():
         my_target_id = t["id"]
         cdp.connect_target(t["id"])
 
-        def load_page(fake_host):
-            """重新加载假页面，并把假 host 设成 fake_host。
+        def load_page(host):
+            """导航到**真实的** https://<host>/ 并把 DOM 换成假页面。
 
-            ⚠ 每次导航后都要**重设** —— 导航会换执行上下文，
-            新文档的 window 上没有 __msCurrentHost。
+            ⚠ 域名是真的 ⇒ `location.hostname` 就是 host，
+              不需要任何「可被页面改写的取值点」。
+            ⚠ 假页面不发起任何真实请求（内容是 setDocumentContent 塞进去的），
+              所以不会打扰真实站点 —— 只是打开了一个该域名的页面。
             """
-            cdp.send("Page.navigate", {"url": url})
-            time.sleep(1.5)
-            cdp.eval(JS_SET_FAKE_HOST % json.dumps(fake_host),
-                     refresh_context=True)
-            time.sleep(0.3)
+            url = "https://%s/magicube/usage" % host
+            try:
+                cdp.send("Page.navigate", {"url": url})
+            except Exception as e:
+                print("  [warn] 导航失败 %s: %s" % (url, e))
+            # 等真实页面加载完（host 判定读的是真实 location）
+            time.sleep(2.0)
+            # 把 DOM 换成假页面（URL 保持不变）
+            try:
+                ft = cdp.send("Page.getFrameTree")
+                fid = ((ft.get("result") or {}).get("frameTree", {})
+                       .get("frame", {}).get("id"))
+                if fid:
+                    cdp.send("Page.setDocumentContent",
+                             {"frameId": fid, "html": FIXTURE})
+            except Exception as e:
+                print("  [warn] setDocumentContent 失败: %s" % e)
+            time.sleep(0.5)
+            # 确认 host 确实是预期的那个（自测自身的正确性校验）
+            try:
+                real = str(cdp.eval("String(location.hostname)") or "")
+                if real != host:
+                    print("  [warn] hostname 与预期不符：期望 %s 实得 %s"
+                          % (host, real))
+            except Exception:
+                pass
+            return url
 
-        # 默认假装自己在魔搭上（否则 host 闸会把所有点击都拒掉）
+        # 默认在魔搭域名下（否则 host 闸会把所有点击都拒掉）
         load_page("www.modelscope.cn")
 
         # 1) 余额判据
@@ -223,7 +239,8 @@ def main():
         # 早先的实现是「Python 侧校验一次 + 每轮 find/click 两次 evaluate」，
         # 校验和点击之间存在窗口 ⇒ 用户中途把标签页导航走，脚本还在点。
         # 现在改成**一次 evaluate** 内完成「校验 → 找 → 点」，
-        # 这里用「把假 hostname 切走」来真实验证它。
+        # 这里用**真实域名 + 假 DOM**（真导航 + setDocumentContent）
+        # 来真实验证它 —— 不需要任何「可被页面改写的取值点」。
         # ================================================================
         guard_js = C.JS_CLAIM_AND_CLICK % (C._JS_PRELUDE + C._js_host_guard())
 
@@ -242,7 +259,7 @@ def main():
               "%s -> %s" % (bal_before, bal_after))
 
         # 11b) 🚨 第三方页 ⇒ **一个按钮都不能点**
-        load_page("evil.example.com")
+        load_page("example.com")
         bal_before = C._balance_of(
             json.loads(cdp.eval(C.JS_AUTH, refresh_context=True) or "{}"))
         r = json.loads(cdp.eval(guard_js) or "{}")
@@ -256,21 +273,40 @@ def main():
               bal_after == bal_before,
               "%s -> %s" % (bal_before, bal_after))
 
-        # 11c) 后缀拼接攻击：evil-modelscope.cn 也不该放行
-        load_page("evil-modelscope.cn")
+        # 11c) 🚨 域名白名单判据（纯逻辑，不必真导航 ——
+        #     有些攻击域名根本 DNS 解析不了，导航过去只会落到
+        #     chrome-error://chromewebdata/，测的就不是白名单了）
+        check("白名单判据：放行 www.modelscope.cn",
+              C._host_allowed("www.modelscope.cn") is True)
+        check("白名单判据：放行 modelscope.cn",
+              C._host_allowed("modelscope.cn") is True)
+        check("白名单判据：拒绝 example.com",
+              C._host_allowed("example.com") is False)
+        check("白名单判据：拒绝后缀拼接 evil-modelscope.cn",
+              C._host_allowed("evil-modelscope.cn") is False)
+        check("白名单判据：拒绝子域劫持 attacker.modelscope.cn.evil.com",
+              C._host_allowed("attacker.modelscope.cn.evil.com") is False)
+        check("白名单判据：拒绝空 host", C._host_allowed("") is False)
+
+
+        # 11e2) 🚨 页面**自己**伪造 host ⇒ 仍必须拒绝
+        #   （这一条专门盯「可被页面改写的取值点」这个后门）
+        load_page("example.com")
+        real_host = str(cdp.eval("String(location.hostname)") or "")
+        check("页面所在域名确实是 example.com",
+              real_host == "example.com", real_host)
+        cdp.eval(
+            "window.__msCurrentHost='www.modelscope.cn';"
+            "window.__fakeHost='www.modelscope.cn';"
+            "window.__msHost='www.modelscope.cn';"
+            "Object.defineProperty(window,'__msCurrentHost',{value:'www.modelscope.cn'});"
+            "1")
         r = json.loads(cdp.eval(guard_js) or "{}")
-        check("后缀拼接 evil-modelscope.cn：拒绝点击",
+        check("页面伪造 host 覆盖变量后：仍然拒绝点击",
               r.get("clicked") is False, str(r))
-
-        # 11d) 子域劫持：attacker.modelscope.cn.evil.com
-        load_page("attacker.modelscope.cn.evil.com")
-        r = json.loads(cdp.eval(guard_js) or "{}")
-        check("子域劫持：拒绝点击", r.get("clicked") is False, str(r))
-
-        # 11e) 空 hostname（file:// 页面就是这种）⇒ 拒绝
-        load_page("")
-        r = json.loads(cdp.eval(guard_js) or "{}")
-        check("空 hostname：拒绝点击", r.get("clicked") is False, str(r))
+        after = str(cdp.eval("String(location.hostname)") or "")
+        check("页面无法改写自己的 location.hostname",
+              after == "example.com", after)
 
         # 11f) 裸域 modelscope.cn 也算魔搭（子域白名单不该过严）
         load_page("modelscope.cn")

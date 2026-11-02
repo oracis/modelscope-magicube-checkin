@@ -3,8 +3,8 @@
 > 魔搭（ModelScope）每日魔粒自动领取 Skill —— 真点页面、以余额变化为唯一成功判据。
 
 **已上架**：
-- SkillHub（腾讯主市场）→ `https://skillhub.cn/skills/modelscope-magicube-checkin`（v1.3.0，已过审）
-- ClawHub（海外市场）→ `https://clawhub.ai/oracis/skills/modelscope-magicube-checkin`（v1.1.0；v1.3.0 排队发布中）
+- SkillHub（腾讯主市场）→ `https://skillhub.cn/skills/modelscope-magicube-checkin`（v1.3.2，已过审）
+- ClawHub（海外市场）→ `https://clawhub.ai/oracis/skills/modelscope-magicube-checkin`（v1.3.2）
 - GitHub 源码 → 本仓库
 
 魔粒（Magicube）是魔搭 API-Inference 的算力额度。**登录魔搭不等于到账** —— 必须到魔粒页点「领取」，额度才会进余额。
@@ -16,7 +16,7 @@
 - **零依赖**：只用 Python 标准库（自带最小 WebSocket + CDP 客户端），无需 `pip install`
 - **两按钮连点**：一天有「注册并登录 200」+「绑定阿里云 50」两个领取按钮，只点一个会漏领
 - **四态可判**：`CLAIMED` / `ALREADY` / `NO_LOGIN` / `UNKNOWN`，退出码区分，漏跑无副作用
-- **带自测**：28 项本地自测钉死「找按钮 / 点按钮 / 余额判据 / 域名白名单 / 页面归属校验」，改 JS 判据后可回归
+- **带自测**：41 项本地自测钉死「找按钮 / 点按钮 / 余额判据 / 域名白名单 / 原子 host 闸」，改 JS 判据后可回归
 
 ## 能力边界（先看这段，能省掉很多误解）
 
@@ -35,16 +35,35 @@
 
 ## 操作范围：只碰魔搭页面
 
-脚本会**在它连上的那个页面上点按钮**，所以「连上哪个页面」必须被约束住。三道闸：
+脚本会**在它连上的那个页面上点按钮**，所以「连上哪个页面」必须被约束住。四道闸：
 
 | 闸 | 作用 |
 |---|---|
 | 找 tab 时限定 host | 只认 `modelscope.cn` 及其子域的 tab |
-| 点击前复核页面归属 | 连上后页面可能被导航走，点之前重新确认 `location.host` |
+| **点击前在页面内原子复核** | 校验与点击在**同一次** JS 执行里完成 |
+| 点击后复核 host | 点击期间页面被导航走 ⇒ 余额判据作废，记 UNKNOWN |
 | 后缀防拼接 | `evil-modelscope.cn`、`a.modelscope.cn.evil.com` 一律拒绝 |
 
 host 判定要求「完全相等」或「以 `.` + 域名结尾」，后缀拼接骗不过去。
-页面归属校验失败时脚本**中止且一个按钮都不点**。
+host 读不到（空串）一律拒绝 —— 宁可误伤也不能在不确定的页面上乱点。
+
+### 为什么 host 校验要写在页面里，而不是在脚本侧
+
+早先的实现是「脚本侧读一次页面确认 host，再分两步找按钮、点按钮」。
+**校验和点击之间隔了一次 CDP 往返** —— 用户在这中间把标签页导航走，
+脚本就会在已经离开魔搭的页面上继续点。
+
+现在把三件事合并进**同一次** `Runtime.evaluate`：
+
+```
+一次 JS 执行（内部不 await、不会让出事件循环 ⇒ 不可能被导航打断）
+  ① hostAllowed()  —— 不过就 return，一个按钮都不点
+  ② 找「领取」按钮
+  ③ 再确认它还是那个按钮 → el.click()
+```
+
+⇒「校验时在魔搭、点击时不在魔搭」的竞态窗口在**结构上消失**。
+脚本侧的 host 检查退化为冗余的额外保险。
 
 启动 Chrome 时**默认不带 `--no-sandbox`**（关沙箱会降低浏览器自身的安全隔离），
 只在容器 / 受管沙箱这类受限环境里 Chrome 启动即退出时才显式追加；

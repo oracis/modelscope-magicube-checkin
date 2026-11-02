@@ -43,6 +43,7 @@ import os
 import re
 import select
 import socket
+import threading
 import struct
 import time
 import urllib.request
@@ -199,6 +200,10 @@ class CDP:
         self.tid = None
         self._id = 0
         self._main_context = None
+        # 🚨 WebSocket 发送/收帧必须**串行化**：
+        #   将来若引入后台线程（处理 CDP 事件），
+        #   与主线程并发收发会让 requestId 与响应交错 ⇒ 协议错乱。
+        self._lock = threading.RLock()
 
     # ---- HTTP 侧 ----
     def _http(self, path):
@@ -311,26 +316,29 @@ class CDP:
     def send(self, method, params=None):
         if self.ws is None:
             raise RuntimeError("未连接页面 target，先 new_target + connect_target")
-        self._id += 1
-        msg = {"id": self._id, "method": method, "params": params or {}}
+        with self._lock:
+            self._id += 1
+            msg = {"id": self._id, "method": method, "params": params or {}}
 
-        def _roundtrip():
-            self.ws.send_text(json.dumps(msg))
-            while True:
-                raw = self.ws.recv_text()
-                resp = json.loads(raw)
-                if resp.get("id") == self._id:
-                    return resp
-                # 其余是事件帧，忽略
+            def _roundtrip():
+                self.ws.send_text(json.dumps(msg))
+                while True:
+                    raw = self.ws.recv_text()
+                    resp = json.loads(raw)
+                    if resp.get("id") == self._id:
+                        return resp
+                    # 其余是事件帧，忽略
+                    # ⚠ 本 skill 不用任何需要处理事件的 CDP 域
+                    #   （Fetch/Network 拦截都不需要）⇒ 事件直接丢弃。
 
-        try:
-            return _roundtrip()
-        except ConnectionError:
-            tid = getattr(self, "tid", None)
-            if not tid or not self.connect_target(tid):
-                raise
-            log("  [warn] CDP 页面连接断开，已重连同一标签页")
-            return _roundtrip()
+            try:
+                return _roundtrip()
+            except ConnectionError:
+                tid = getattr(self, "tid", None)
+                if not tid or not self.connect_target(tid):
+                    raise
+                log("  [warn] CDP 页面连接断开，已重连同一标签页")
+                return _roundtrip()
 
     def eval(self, expr, refresh_context=False, context_id=None):
         if refresh_context or (context_id is None and self._main_context is None):

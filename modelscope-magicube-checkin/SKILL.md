@@ -2,7 +2,7 @@
 name: modelscope-magicube-checkin
 slug: modelscope-magicube-checkin
 displayName: 魔搭魔粒每日自动领取
-version: 1.3.2
+version: 1.3.3
 visibility: public
 category: dev-programming
 subCategories: [dev-script]
@@ -67,6 +67,19 @@ host 判定要求「完全相等」或「以 `.` + 域名结尾」，因此 `evi
 
 页面归属校验失败时脚本**中止且一个按钮都不点**，返回 `UNKNOWN` 并在 detail 里
 说明当前 host。
+
+### 🔒 host 只从 `location.hostname` 读，**没有任何可被页面改写的取值点**
+
+2026-11-02 踩过一个大坑：当时为了「让自测能造出非魔搭页面」，给 host 判定加了一个
+`window.__msCurrentHost` 覆盖通道 —— 结果它本身就是一个**后门**：任何页面
+（包括恶意页面）都能把它设成 `www.modelscope.cn` 来伪装自己。ClawHub 的安全评审
+直接点名：
+
+> *"the skill can be tricked into clicking on another website"*
+
+⇒ **可测性绝不能以削弱安全边界为代价**。现在 host 判定只读 `location.hostname`
+（页面无法伪造自己的 `location.hostname`），自测改用「真实域名 + 假 DOM」
+（`Page.navigate` 到真域名，再 `Page.setDocumentContent` 换内容）来构造场景。
 
 ## 何时使用
 
